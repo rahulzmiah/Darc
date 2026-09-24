@@ -89,12 +89,22 @@ function hideOverlay() {
   page.webContents.focus();
 }
 
-function setWindowSize(width, height) {
+const SIZE_PRESETS = [
+  [1280, 720, '16:9'],
+  [1600, 900, '16:9'],
+  [1920, 1080, '16:9'],
+  [1280, 800, '16:10'],
+  [1440, 900, '16:10'],
+  [1680, 1050, '16:10'],
+  [1920, 1200, '16:10'],
+];
+
+function setWindowSize(width, height, ratio) {
   if (win.isFullScreen()) win.setFullScreen(false);
   win.setContentSize(width, height, true);
   win.center();
   const [w, h] = win.getContentSize();
-  showToast(`${w} × ${h}`);
+  showToast(`${w} × ${h} · ${ratio}`);
 }
 
 function buildMenu() {
@@ -141,9 +151,15 @@ function buildMenu() {
     {
       label: 'Window',
       submenu: [
-        { label: '1280 × 720', accelerator: 'CmdOrCtrl+1', click: () => setWindowSize(1280, 720) },
-        { label: '1440 × 900', accelerator: 'CmdOrCtrl+2', click: () => setWindowSize(1440, 900) },
-        { label: '1920 × 1080', accelerator: 'CmdOrCtrl+3', click: () => setWindowSize(1920, 1080) },
+        ...SIZE_PRESETS.flatMap(([width, height, ratio], i) => [
+          ...(i > 0 && SIZE_PRESETS[i - 1][2] !== ratio ? [{ type: 'separator' }] : []),
+          {
+            label: `${width} × ${height}  (${ratio})`,
+            accelerator: `CmdOrCtrl+${i + 1}`,
+            click: () => setWindowSize(width, height, ratio),
+          },
+        ]),
+        { type: 'separator' },
         { label: 'Center', accelerator: 'CmdOrCtrl+Alt+C', click: () => win.center() },
         { type: 'separator' },
         { role: 'minimize' },

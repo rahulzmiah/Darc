@@ -14,7 +14,8 @@ npm start
 | Esc | Close the overlay |
 | ⌘R / ⇧⌘R | Reload / hard reload |
 | ⌘[ / ⌘] | Back / forward |
-| ⌘1 / ⌘2 / ⌘3 | Resize window to 1280×720 / 1440×900 / 1920×1080 and center it |
+| ⌘1 / ⌘2 / ⌘3 | Resize to 16:9: 1280×720 / 1600×900 / 1920×1080 (centered) |
+| ⌘4 / ⌘5 / ⌘6 / ⌘7 | Resize to 16:10: 1280×800 / 1440×900 / 1680×1050 / 1920×1200 (centered) |
 | ⌘= / ⌘- / ⌘0 | Page zoom |
 | ⌃⌘F | Fullscreen |
 

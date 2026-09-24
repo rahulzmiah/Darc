@@ -1,0 +1,19 @@
+{
+  "name": "narc",
+  "version": "0.1.0",
+  "description": "A chrome-less Chromium browser for recording buttery-smooth website footage.",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rahulzmiah/Narc.git"
+  },
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^44.4.5"
+  }
+}

@@ -12,6 +12,8 @@ const DEFAULTS = {
   hideScrollbars: true,
 };
 
+const DEFAULT_EASING = [0.87, 0, 0.13, 1]; // ease in-out · expo
+
 const BLANK_PAGE = 'data:text/html,<body style="background:%23000"></body>';
 
 const storePath = path.join(app.getPath('userData'), 'settings.json');
@@ -35,6 +37,8 @@ function save() {
 
 let win, page, overlay, toast, animator;
 let toastTimer;
+let markerPrompt = null; // { key } while the toast is asking to restart a timeline
+let markerVisitKey = null; // page whose saved timeline the user has already been asked about this visit
 let overlayMode = null;
 let scrollbarCssKey = null;
 
@@ -51,16 +55,32 @@ function layout() {
   const [width, height] = win.getContentSize();
   page.setBounds({ x: 0, y: 0, width, height });
   overlay.setBounds({ x: 0, y: 0, width, height });
-  const tw = 240;
-  const th = 48;
+  const tw = 340;
+  const th = 52;
   toast.setBounds({ x: Math.round((width - tw) / 2), y: height - th - 28, width: tw, height: th });
 }
 
 function showToast(text) {
+  markerPrompt = null;
   toast.setVisible(true);
   toast.webContents.executeJavaScript(`show(${JSON.stringify(text)})`);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.setVisible(false), 2200);
+}
+
+// A toast with ✕ / ✓ buttons. Left unanswered it goes away as if dismissed.
+function askToast(text) {
+  toast.setVisible(true);
+  toast.webContents.executeJavaScript(`ask(${JSON.stringify(text)})`);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(dismissToast, 8000);
+}
+
+function dismissToast() {
+  markerPrompt = null;
+  clearTimeout(toastTimer);
+  toast.webContents.executeJavaScript('hide()').catch(() => {});
+  toastTimer = setTimeout(() => toast.setVisible(false), 300);
 }
 
 async function applyScrollbarCss() {
@@ -179,6 +199,7 @@ function toggleAnimator() {
 // reveal) — a single capture from the top would drift from what playback shows.
 const PREVIEW_SETTLE = 350; // ms for scroll-driven interactions to catch up
 const PREVIEW_MAX_SCREENS = 60;
+const PREVIEW_IDLE = 1500; // ms after a page loads or resizes before capturing in the background
 const withTimeout = (promise, ms) => {
   let timer;
   return Promise.race([
@@ -189,9 +210,11 @@ const withTimeout = (promise, ms) => {
   ]).finally(() => clearTimeout(timer));
 };
 
-async function capturePreview() {
-  const live = page.webContents;
-  const [width, height] = await live.executeJavaScript('[innerWidth, innerHeight]');
+async function capturePreview(job) {
+  const { url, width, height, zoom } = job;
+  const alive = () => {
+    if (job.cancelled) throw new Error('Capture superseded');
+  };
   const copy = new BrowserWindow({
     show: false,
     width,
@@ -202,12 +225,36 @@ async function capturePreview() {
   const wc = copy.webContents;
   try {
     wc.setAudioMuted(true);
-    wc.setZoomLevel(live.getZoomLevel());
-    await withTimeout(wc.loadURL(live.getURL()).catch(() => {}), 30000);
+    wc.setZoomLevel(zoom);
+    await withTimeout(wc.loadURL(url).catch(() => {}), 30000);
+    alive();
     if (store.settings.hideScrollbars) {
       await wc.insertCSS('::-webkit-scrollbar{display:none!important}*{scrollbar-width:none!important}', { cssOrigin: 'user' });
     }
     await new Promise((r) => setTimeout(r, 600)); // let fonts and late layout settle
+    alive();
+    // Run through the whole page first, half a screen at a time, so reveal-on-
+    // scroll content and lazy images have all fired before anything is captured.
+    // Waits at the bottom for lazily appended content, then returns to the top.
+    await withTimeout(wc.executeJavaScript(`new Promise(async (resolve) => {
+      const el = document.scrollingElement || document.documentElement;
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const atBottom = () => el.scrollTop + innerHeight >= el.scrollHeight - 1;
+      const limit = innerHeight * ${PREVIEW_MAX_SCREENS};
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline && el.scrollTop < limit) {
+        if (atBottom()) {
+          await wait(600);
+          if (atBottom()) break;
+        }
+        el.scrollTo({ top: el.scrollTop + innerHeight / 2, behavior: 'instant' });
+        await wait(120);
+      }
+      el.scrollTo({ top: 0, behavior: 'instant' });
+      await wait(500);
+      resolve();
+    })`), 30000);
+    alive();
     // Past the first screen, small fixed/sticky bars (headers, chat bubbles) are
     // hidden so they aren't stamped onto every screen of the stitched preview.
     // Big ones are left alone — they're backgrounds or pinned scroll sections.
@@ -229,6 +276,7 @@ async function capturePreview() {
     let info;
     for (let i = 0; i < PREVIEW_MAX_SCREENS; i++) {
       info = await scrollTo(covered);
+      alive();
       // At the bottom the scroll clamps short, overlapping the last screen.
       const skip = Math.max(0, covered - info.top);
       const tileHeight = info.viewport - skip;
@@ -242,10 +290,56 @@ async function capturePreview() {
       covered = info.top + info.viewport;
       if (covered >= info.height - 1) break;
     }
+    alive();
     return { tiles, width: info.width, height: covered, viewport: info.viewport };
   } finally {
     copy.destroy();
   }
+}
+
+// The preview is captured in the background whenever the page loads or the
+// window resizes, so it's ready by the time the animation panel asks for it.
+// One capture runs at a time; a newer request for a different page supersedes it.
+let preview = null; // { id, job, promise }
+let previewTimer;
+
+async function previewJob() {
+  const live = page.webContents;
+  const url = live.getURL();
+  if (!/^https?:/.test(url)) return null;
+  const [width, height] = await live.executeJavaScript('[innerWidth, innerHeight]');
+  const zoom = live.getZoomLevel();
+  const id = [url, width, height, zoom, store.settings.hideScrollbars].join('|');
+  return { id, url, width, height, zoom, cancelled: false };
+}
+
+async function getPreview(force) {
+  const job = await previewJob();
+  if (!job) throw new Error('Nothing to capture');
+  if (!force && preview && preview.id === job.id) return preview.promise;
+  if (preview) preview.job.cancelled = true;
+  // Anyone still waiting on a superseded capture gets the one that replaced it.
+  const promise = capturePreview(job).catch((err) => {
+    if (job.cancelled && preview) return preview.promise;
+    throw err;
+  });
+  const entry = { id: job.id, job, promise };
+  preview = entry;
+  // Don't keep failures around; the next request should try again.
+  promise.catch(() => preview === entry && (preview = null));
+  return promise;
+}
+
+// A load (including a reload of the same URL) makes any earlier capture stale.
+function invalidatePreview() {
+  if (preview) preview.job.cancelled = true;
+  preview = null;
+  schedulePreview();
+}
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => getPreview(false).catch(() => {}), PREVIEW_IDLE);
 }
 
 // Ask the page for its scroll position — the smooth-scroll target if a scroll
@@ -266,23 +360,42 @@ function pageScrollY() {
 }
 
 // Record mode: scroll the page, then drop a marker at the current position —
-// same as clicking the preview in the animation panel.
+// same as clicking the preview in the animation panel. The first marker on a
+// visit to a page that already has a timeline asks whether to start over, so
+// re-recording doesn't pile new markers onto the old ones.
 async function setMarker() {
   const key = animationKey();
   if (!key) return showToast('Open a page first · ⌘L');
+  const saved = store.animations[key] || [];
+  if (markerPrompt) {
+    // ⌘K again while asking means "keep it" — carry on adding markers.
+    dismissToast();
+  } else if (markerVisitKey !== key && saved.length) {
+    markerVisitKey = key;
+    markerPrompt = { key };
+    return askToast(`Restart timeline? ${saved.length} marker${saved.length === 1 ? '' : 's'} saved`);
+  }
+  markerVisitKey = key;
+  addMarker(key, false);
+}
+
+async function addMarker(key, reset) {
   const y = await pageScrollY();
   if (y == null) return;
   if (animator && !animator.isDestroyed()) {
     // The panel owns the stops while it's open; let it add the marker so its
     // pending edits aren't clobbered.
-    sendToAnimator('anim:add-stop', { key, y });
+    sendToAnimator('anim:add-stop', { key, y, reset });
   } else {
-    const stops = store.animations[key] || [];
-    stops.push({ y, duration: 1600, easing: [0.83, 0, 0.17, 1], hold: 600 });
+    const stops = reset ? [] : store.animations[key] || [];
+    // Easing is shared across the track, so follow the existing lines.
+    const prev = store.animations[key] || [];
+    const easing = prev.length ? [...prev[0].easing] : [...DEFAULT_EASING];
+    stops.push({ y, duration: 1600, easing, hold: 600 });
     store.animations[key] = stops;
     save();
   }
-  showToast(`Marker set · ${y}px`);
+  showToast(reset ? `Timeline restarted · ${y}px` : `Marker set · ${y}px`);
 }
 
 function playAnimation() {
@@ -401,7 +514,13 @@ function createWindow() {
   overlay.setBackgroundColor('#00000000');
   overlay.setVisible(false);
 
-  toast = new WebContentsView();
+  toast = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'toast-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
   toast.setBackgroundColor('#00000000');
   toast.setVisible(false);
   toast.webContents.loadFile(path.join(__dirname, 'toast.html'));
@@ -411,6 +530,7 @@ function createWindow() {
   win.contentView.addChildView(toast);
   layout();
   win.on('resize', layout);
+  win.on('resize', schedulePreview);
   win.on('close', () => {
     store.bounds = win.getBounds();
     clearTimeout(saveTimer);
@@ -425,6 +545,8 @@ function createWindow() {
   wc.on('dom-ready', () => {
     scrollbarCssKey = null;
     applyScrollbarCss();
+    // No keyboard focus rings on recorded pages.
+    wc.insertCSS('*:focus,*:focus-visible{outline:none!important}', { cssOrigin: 'user' }).catch(() => {});
   });
   const remember = (_e, url) => {
     if (url.startsWith('http')) {
@@ -433,9 +555,16 @@ function createWindow() {
     }
   };
   wc.on('did-navigate', remember);
+  // A fresh visit (including a reload) asks again before adding to a saved timeline.
+  wc.on('did-navigate', () => {
+    markerVisitKey = null;
+    if (markerPrompt) dismissToast();
+  });
   wc.on('did-navigate-in-page', remember);
   wc.on('did-finish-load', () => sendToAnimator('anim:page-changed'));
   wc.on('did-navigate-in-page', () => sendToAnimator('anim:page-changed'));
+  wc.on('did-finish-load', invalidatePreview);
+  wc.on('did-navigate-in-page', schedulePreview);
 
   overlay.webContents.loadFile(path.join(__dirname, 'overlay.html'));
   if (store.lastUrl) {
@@ -474,12 +603,21 @@ ipcMain.on('navigate', (_e, input) => {
 
 ipcMain.on('overlay:hide', hideOverlay);
 
+ipcMain.on('toast:answer', (_e, ok) => {
+  const prompt = markerPrompt;
+  if (!prompt) return;
+  dismissToast();
+  if (ok && prompt.key === animationKey()) addMarker(prompt.key, true);
+  win.focus();
+  page.webContents.focus();
+});
+
 ipcMain.handle('anim:load', () => {
   const key = animationKey();
   return { key, stops: (key && store.animations[key]) || [] };
 });
 
-ipcMain.handle('anim:capture', () => capturePreview());
+ipcMain.handle('anim:capture', (_e, force) => getPreview(force));
 
 ipcMain.on('anim:set', (_e, { key, stops }) => {
   if (!key) return;

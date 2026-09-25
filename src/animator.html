@@ -67,6 +67,7 @@
   label.advanced:hover { color: #bbb; }
   label.advanced input { margin: 0; accent-color: #fff; }
   body:not(.advanced) .easing { display: none; }
+  #easing { padding: 6px 16px 14px; border-top: 1px solid #1f1f1f; }
   .hint { padding: 10px 16px; color: #555; font-size: 11px; border-top: 1px solid #1f1f1f; }
 
   .stop { padding: 14px 16px; border-bottom: 1px solid #1a1a1a; border-left: 2px solid transparent; }
@@ -127,6 +128,18 @@
   </div>
   <aside>
     <div id="stops"></div>
+    <div class="easing" id="easing">
+      <div class="field"><label>Easing</label>
+        <select id="easing-preset"></select></div>
+      <div class="curve"><svg></svg>
+        <div class="bez">
+          <input class="num" data-bez="0" type="number" step="0.01" min="0" max="1">
+          <input class="num" data-bez="1" type="number" step="0.01">
+          <input class="num" data-bez="2" type="number" step="0.01" min="0" max="1">
+          <input class="num" data-bez="3" type="number" step="0.01">
+        </div>
+      </div>
+    </div>
     <label class="advanced"><input type="checkbox" id="advanced"> Advanced options</label>
     <div class="hint">Click the preview or scroll the page and press ⌘K to add a line · drag lines to move · drag ⋮⋮ to reorder · ⌫ delete · space play (here or in the page) · esc stop</div>
   </aside>
@@ -175,9 +188,45 @@
   const clampY = (y) => Math.round(Math.max(0, pageInfo ? Math.min(maxY(), y) : y));
   const sameCurve = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
 
+  // One easing curve is shared by every line in the track.
+  let easing = [...DEFAULT_EASING];
+
   function newStop(y) {
-    return { y, duration: 1600, easing: [...DEFAULT_EASING], hold: 600 };
+    return { y, duration: 1600, easing: [...easing], hold: 600 };
   }
+
+  const easingPanel = $('easing');
+  const easingPreset = $('easing-preset');
+  easingPreset.innerHTML = EASINGS.map(([name], j) => `<option value="${j}">${name}</option>`).join('')
+    + '<option value="custom">Custom</option>';
+
+  function renderEasing() {
+    easingPanel.querySelector('svg').outerHTML = curveSvg(easing);
+    const preset = EASINGS.findIndex(([, e]) => sameCurve(e, easing));
+    easingPreset.value = preset < 0 ? 'custom' : preset;
+    easingPanel.querySelectorAll('[data-bez]').forEach((inp, j) => {
+      if (inp !== document.activeElement) inp.value = easing[j];
+    });
+  }
+
+  function applyEasing() {
+    for (const s of stops) s.easing = [...easing];
+    renderEasing();
+    if (key) commit();
+  }
+
+  easingPanel.addEventListener('input', (e) => {
+    if (e.target === easingPreset) {
+      if (easingPreset.value === 'custom') return;
+      easing = [...EASINGS[+easingPreset.value][1]];
+    } else if (e.target.dataset.bez !== undefined) {
+      const v = parseFloat(e.target.value);
+      if (Number.isNaN(v)) return;
+      const j = +e.target.dataset.bez;
+      easing[j] = j % 2 ? v : Math.max(0, Math.min(1, v));
+    }
+    applyEasing();
+  });
 
   let saveTimer;
   function commit() {
@@ -245,7 +294,6 @@
       return;
     }
     list.innerHTML = stops.map((s, i) => {
-      const preset = EASINGS.find(([, e]) => sameCurve(e, s.easing));
       return `<div class="stop${i === selected ? ' selected' : ''}${progress.playing && progress.index === i ? ' active' : ''}" data-index="${i}">
         <div class="stop-head">
           <span class="grip" data-grip title="Drag to reorder">⋮⋮</span>
@@ -255,14 +303,6 @@
           <button class="remove" data-remove="${i}" title="Delete">×</button>
         </div>
         ${field('Duration', 'duration', s.duration, 0.1, 10)}
-        <div class="easing"><div class="field"><label>Easing</label>
-          <select data-field="preset">
-            ${EASINGS.map(([name], j) => `<option value="${j}"${preset && preset[0] === name ? ' selected' : ''}>${name}</option>`).join('')}
-            <option value="custom"${preset ? '' : ' selected'}>Custom</option>
-          </select></div>
-          <div class="curve">${curveSvg(s.easing)}
-            <div class="bez">${s.easing.map((v, j) => `<input class="num" data-bez="${j}" type="number" step="0.01" ${j % 2 ? '' : 'min="0" max="1"'} value="${v}">`).join('')}</div>
-          </div></div>
         ${field('Hold', 'hold', s.hold, 0, 10)}
       </div>`;
     }).join('');
@@ -292,20 +332,7 @@
     const i = +card.dataset.index;
     const s = stops[i];
     const f = e.target.dataset.field;
-    if (e.target.dataset.bez !== undefined) {
-      const v = parseFloat(e.target.value);
-      if (Number.isNaN(v)) return;
-      const j = +e.target.dataset.bez;
-      s.easing[j] = j % 2 ? v : Math.max(0, Math.min(1, v));
-      card.querySelector('.curve svg').outerHTML = curveSvg(s.easing);
-      const preset = EASINGS.findIndex(([, ez]) => sameCurve(ez, s.easing));
-      card.querySelector('select').value = preset < 0 ? 'custom' : preset;
-    } else if (f === 'preset') {
-      if (e.target.value === 'custom') return;
-      s.easing = [...EASINGS[+e.target.value][1]];
-      card.querySelector('.curve svg').outerHTML = curveSvg(s.easing);
-      card.querySelectorAll('[data-bez]').forEach((inp, j) => (inp.value = s.easing[j]));
-    } else if (f) {
+    if (f) {
       const v = parseFloat(e.target.value);
       if (Number.isNaN(v)) return;
       s[f] = f === 'y' ? clampY(v) : Math.round(Math.max(0, v) * 1000);
@@ -442,7 +469,7 @@
   }
 
   $('play').addEventListener('click', togglePlay);
-  $('refresh').addEventListener('click', () => capture());
+  $('refresh').addEventListener('click', () => capture(true));
 
   // Clear takes a second click to confirm, since it wipes the whole track.
   let clearTimer;
@@ -468,6 +495,10 @@
 
   narc.onAddStop((data) => {
     if (data.key !== key) return;
+    if (data.reset) {
+      if (progress.playing) narc.stop();
+      stops = [];
+    }
     stops.push(newStop(clampY(data.y)));
     commit();
     render();
@@ -516,12 +547,12 @@
   window.addEventListener('resize', renderMarks);
 
   let captureId = 0;
-  async function capture() {
+  async function capture(force) {
     const id = ++captureId;
     $('empty').style.display = 'flex';
     $('empty').textContent = 'Capturing page…';
     try {
-      const info = await narc.capture();
+      const info = await narc.capture(force);
       if (id !== captureId) return;
       pageInfo = info;
       shot.innerHTML = info.tiles.map((t) => `<img src="${t.src}" style="aspect-ratio:${info.width}/${t.height}">`).join('');
@@ -539,6 +570,10 @@
     key = data.key;
     stops = data.stops;
     selected = 0;
+    // Older tracks could mix curves; bring every line in line with the first.
+    easing = stops.length ? [...stops[0].easing] : [...DEFAULT_EASING];
+    if (stops.some((s) => !sameCurve(s.easing, easing))) applyEasing();
+    else renderEasing();
     pageInfo = null;
     shot.innerHTML = '';
     render();

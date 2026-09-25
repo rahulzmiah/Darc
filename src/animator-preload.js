@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('narc', {
   load: () => ipcRenderer.invoke('anim:load'),
-  capture: () => ipcRenderer.invoke('anim:capture'),
+  capture: (force) => ipcRenderer.invoke('anim:capture', force),
   save: (key, stops) => ipcRenderer.send('anim:set', { key, stops }),
   play: () => ipcRenderer.send('anim:play'),
   stop: () => ipcRenderer.send('anim:stop'),

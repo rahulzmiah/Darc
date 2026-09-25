@@ -1,16 +1,19 @@
-# Narc
+# Darc
 
 A chrome-less Chromium browser for recording websites. No tabs, no toolbar, sharp corners. Every scroll is eased with a spring, so footage looks keyframed rather than hand-scrolled.
 
 ```sh
 npm install
-npm start
+npm start        # run from source
+npm run package  # build dist/Darc-darwin-*/Darc.app
 ```
 
 | Shortcut | Action |
 | --- | --- |
 | ⌘L | URL bar (paste a URL or search terms) |
 | ⌘, | Scroll settings |
+| ⌘. | Animation panel |
+| ⌘↩ | Play the page's scroll animation (Esc or scrolling stops it) |
 | Esc | Close the overlay |
 | ⌘R / ⇧⌘R | Reload / hard reload |
 | ⌘[ / ⌘] | Back / forward |
@@ -31,3 +34,14 @@ Wheel, trackpad, arrow, space, PageUp/PageDown, and Home/End scrolling all run t
 - **Speed limit** caps the velocity so fast flicks still read cleanly on video.
 
 Mouse wheel and trackpad have separate speed multipliers. Pages that already use their own smooth-scroll library (Lenis, Locomotive) are left alone, as are wheel events the page itself handles (maps, carousels).
+
+## Scroll animations
+
+⌘. opens the animation panel in its own window, showing a full-length capture of the current page.
+
+- Click the preview to drop a numbered line. Each line is the top of the frame the page scrolls to. Drag lines to move them, or type exact pixel values.
+- Playback starts from wherever the page currently is and eases to each line in order. Drag the ⋮⋮ handle on a line's card to reorder.
+- Each move has its own duration, easing (presets or a custom cubic-bezier), and a hold before the next move, all in seconds.
+- **Play** (or space in the panel, or ⌘↩ anywhere) runs it in the main window immediately. **Refresh** recaptures the page after it changes.
+
+Animations are saved per page (origin + path).

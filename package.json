@@ -1,11 +1,13 @@
 {
-  "name": "narc",
+  "name": "darc",
+  "productName": "Darc",
   "version": "0.1.0",
   "description": "A chrome-less Chromium browser for recording buttery-smooth website footage.",
   "main": "src/main.js",
   "private": true,
   "scripts": {
-    "start": "env -u ELECTRON_RUN_AS_NODE electron ."
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "package": "electron-packager . Darc --platform=darwin --icon=assets/icon.icns --app-bundle-id=com.rahulmiah.darc --out=dist --overwrite --ignore=\"^/dist\" --ignore=\"^/assets/logo.png\""
   },
   "repository": {
     "type": "git",
@@ -14,6 +16,7 @@
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "@electron/packager": "^20.3.0",
     "electron": "^44.4.5"
   }
 }

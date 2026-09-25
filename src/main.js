@@ -1,4 +1,4 @@
-const { app, BaseWindow, WebContentsView, Menu, ipcMain, screen } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -15,7 +15,13 @@ const DEFAULTS = {
 const BLANK_PAGE = 'data:text/html,<body style="background:%23000"></body>';
 
 const storePath = path.join(app.getPath('userData'), 'settings.json');
-let store = { settings: { ...DEFAULTS }, lastUrl: '', bounds: null };
+// Carry settings over from when the app was called Narc.
+const legacyStorePath = path.join(app.getPath('appData'), 'narc', 'settings.json');
+if (!fs.existsSync(storePath) && fs.existsSync(legacyStorePath)) {
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  fs.copyFileSync(legacyStorePath, storePath);
+}
+let store = { settings: { ...DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorBounds: null };
 try {
   const saved = JSON.parse(fs.readFileSync(storePath, 'utf8'));
   store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings } };
@@ -27,7 +33,7 @@ function save() {
   saveTimer = setTimeout(() => fs.writeFileSync(storePath, JSON.stringify(store, null, 2)), 300);
 }
 
-let win, page, overlay, toast;
+let win, page, overlay, toast, animator;
 let toastTimer;
 let overlayMode = null;
 let scrollbarCssKey = null;
@@ -107,6 +113,128 @@ function setWindowSize(width, height, ratio) {
   showToast(`${w} × ${h} · ${ratio}`);
 }
 
+// Scroll animations are saved per page (origin + path).
+function animationKey() {
+  try {
+    const u = new URL(page.webContents.getURL());
+    return u.protocol.startsWith('http') ? u.origin + u.pathname : null;
+  } catch {
+    return null;
+  }
+}
+
+function sendToAnimator(channel, data) {
+  if (animator && !animator.isDestroyed()) animator.webContents.send(channel, data);
+}
+
+function toggleAnimator() {
+  if (animator && !animator.isDestroyed()) {
+    if (animator.isFocused()) animator.close();
+    else animator.focus();
+    return;
+  }
+  let bounds = store.animatorBounds;
+  if (!bounds) {
+    const main = win.getBounds();
+    const area = screen.getDisplayMatching(main).workArea;
+    const width = 680;
+    const height = Math.min(880, area.height);
+    const x = main.x + main.width + 12 + width <= area.x + area.width ? main.x + main.width + 12 : area.x + area.width - width;
+    bounds = { x, y: Math.max(area.y, main.y), width, height };
+  }
+  animator = new BrowserWindow({
+    ...bounds,
+    minWidth: 560,
+    minHeight: 420,
+    title: 'Animation',
+    frame: false,
+    roundedCorners: false,
+    hasShadow: true,
+    backgroundColor: '#0b0b0b',
+    webPreferences: {
+      preload: path.join(__dirname, 'animator-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  animator.loadFile(path.join(__dirname, 'animator.html'));
+  const remember = () => {
+    store.animatorBounds = animator.getBounds();
+    save();
+  };
+  animator.on('moved', remember);
+  animator.on('resized', remember);
+  animator.on('closed', () => {
+    animator = null;
+  });
+}
+
+// Full-length screenshot of the page, downscaled for the animation panel.
+// Taken from a hidden offscreen copy of the page: capturing beyond the viewport
+// on the live view can freeze its rendering for ~30s. Captured in tiles
+// because a single very tall capture hangs Chromium.
+const PREVIEW_TILE = 4000;
+const withTimeout = (promise, ms) => {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Timed out capturing the page')), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
+
+async function capturePreview() {
+  const live = page.webContents;
+  const [width, height] = await live.executeJavaScript('[innerWidth, innerHeight]');
+  const copy = new BrowserWindow({
+    show: false,
+    width,
+    height,
+    useContentSize: true,
+    webPreferences: { offscreen: true, sandbox: true, contextIsolation: true },
+  });
+  const wc = copy.webContents;
+  try {
+    wc.setAudioMuted(true);
+    wc.setZoomLevel(live.getZoomLevel());
+    await withTimeout(wc.loadURL(live.getURL()).catch(() => {}), 30000);
+    if (store.settings.hideScrollbars) {
+      await wc.insertCSS('::-webkit-scrollbar{display:none!important}*{scrollbar-width:none!important}', { cssOrigin: 'user' });
+    }
+    await new Promise((r) => setTimeout(r, 600)); // let fonts and late layout settle
+    const info = await wc.executeJavaScript(`(() => {
+      const el = document.scrollingElement || document.documentElement;
+      return { width: innerWidth, height: el.scrollHeight, viewport: innerHeight, dpr: devicePixelRatio };
+    })()`);
+    const scale = Math.min(1, 640 / (info.width * info.dpr));
+    wc.debugger.attach('1.3');
+    const tiles = [];
+    for (let y = 0; y < info.height; y += PREVIEW_TILE) {
+      const tileHeight = Math.min(PREVIEW_TILE, info.height - y);
+      const { data } = await withTimeout(wc.debugger.sendCommand('Page.captureScreenshot', {
+        format: 'jpeg',
+        quality: 82,
+        captureBeyondViewport: true,
+        clip: { x: 0, y, width: info.width, height: tileHeight, scale },
+      }), 10000);
+      tiles.push({ src: `data:image/jpeg;base64,${data}`, height: tileHeight });
+    }
+    return { tiles, ...info };
+  } finally {
+    copy.destroy();
+  }
+}
+
+function playAnimation() {
+  const stops = store.animations[animationKey()];
+  if (!stops || !stops.length) return showToast('No animation for this page · ⌘.');
+  hideOverlay();
+  win.focus();
+  page.webContents.focus();
+  page.webContents.send('anim:play', stops);
+}
+
 function buildMenu() {
   const nav = (fn) => () => fn(page.webContents.navigationHistory);
   const template = [
@@ -149,6 +277,15 @@ function buildMenu() {
       ],
     },
     {
+      label: 'Animation',
+      submenu: [
+        { label: 'Animation Panel', accelerator: 'CmdOrCtrl+.', click: toggleAnimator },
+        { type: 'separator' },
+        { label: 'Play', accelerator: 'CmdOrCtrl+Enter', click: playAnimation },
+        { label: 'Stop', accelerator: 'Shift+CmdOrCtrl+.', click: () => page.webContents.send('anim:stop') },
+      ],
+    },
+    {
       label: 'Window',
       submenu: [
         ...SIZE_PRESETS.flatMap(([width, height, ratio], i) => [
@@ -186,6 +323,9 @@ function createWindow() {
       preload: path.join(__dirname, 'page-preload.js'),
       contextIsolation: true,
       sandbox: true,
+      // Keep painting while the animation panel covers the window, so previews
+      // can be captured and playback stays smooth.
+      backgroundThrottling: false,
     },
   });
   page.setBackgroundColor('#000000');
@@ -233,6 +373,8 @@ function createWindow() {
   };
   wc.on('did-navigate', remember);
   wc.on('did-navigate-in-page', remember);
+  wc.on('did-finish-load', () => sendToAnimator('anim:page-changed'));
+  wc.on('did-navigate-in-page', () => sendToAnimator('anim:page-changed'));
 
   overlay.webContents.loadFile(path.join(__dirname, 'overlay.html'));
   if (store.lastUrl) {
@@ -271,7 +413,27 @@ ipcMain.on('navigate', (_e, input) => {
 
 ipcMain.on('overlay:hide', hideOverlay);
 
+ipcMain.handle('anim:load', () => {
+  const key = animationKey();
+  return { key, stops: (key && store.animations[key]) || [] };
+});
+
+ipcMain.handle('anim:capture', () => capturePreview());
+
+ipcMain.on('anim:set', (_e, { key, stops }) => {
+  if (!key) return;
+  if (stops.length) store.animations[key] = stops;
+  else delete store.animations[key];
+  save();
+});
+
+ipcMain.on('anim:play', playAnimation);
+ipcMain.on('anim:close', () => animator && animator.close());
+ipcMain.on('anim:stop', () => page.webContents.send('anim:stop'));
+ipcMain.on('anim:progress', (_e, data) => sendToAnimator('anim:progress', data));
+
 app.whenReady().then(() => {
+  if (!app.isPackaged) app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
   buildMenu();
   createWindow();
 });

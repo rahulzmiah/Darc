@@ -1,0 +1,511 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Animation</title>
+<style>
+  * { box-sizing: border-box; margin: 0; border-radius: 0 !important; }
+  html, body { height: 100%; overflow: hidden; background: #0b0b0b; }
+  body {
+    display: flex; flex-direction: column;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    color: #ededed;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  input, select { font: inherit; color: inherit; }
+
+  header {
+    flex: none; height: 44px; padding: 0 12px 0 16px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid #1f1f1f;
+    -webkit-app-region: drag;
+  }
+  header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+  header .meta { color: #666; font-variant-numeric: tabular-nums; flex: 1; }
+  header button { -webkit-app-region: no-drag; }
+  .btn { padding: 5px 10px; border: 1px solid #333; color: #bbb; }
+  .btn:hover { color: #fff; border-color: #555; }
+  .btn.primary { background: #fff; color: #000; border-color: #fff; min-width: 64px; }
+  .btn.primary:hover { background: #ddd; }
+  #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
+  #close:hover { color: #fff; }
+  html { border: 1px solid #2a2a2a; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  #preview-wrap { flex: none; width: 300px; overflow-y: auto; background: #050505; position: relative; }
+  #preview-wrap::-webkit-scrollbar { width: 8px; }
+  #preview-wrap::-webkit-scrollbar-thumb { background: #2a2a2a; }
+  #preview { position: relative; margin: 16px auto; width: calc(100% - 32px); cursor: crosshair; }
+  #shot { outline: 1px solid #1f1f1f; }
+  #shot img { display: block; width: 100%; pointer-events: none; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #555; text-align: center; padding: 24px; white-space: pre-line; }
+
+  .frame { position: absolute; left: 0; right: 0; pointer-events: none; }
+  .frame.selected { background: rgba(255, 255, 255, 0.06); outline: 1px dashed rgba(255, 255, 255, 0.35); }
+  .frame.playhead { outline: 2px solid #ff4d2e; background: rgba(255, 77, 46, 0.06); }
+  .line { position: absolute; left: -8px; right: -8px; height: 11px; margin-top: -5px; cursor: ns-resize; }
+  .line::before { content: ""; position: absolute; left: 8px; right: 8px; top: 5px; height: 1px; background: #4da3ff; }
+  .line span {
+    position: absolute; left: 0; top: -2px; min-width: 16px; height: 15px; padding: 0 4px;
+    background: #4da3ff; color: #000; font-size: 10px; font-weight: 600; line-height: 15px; text-align: center;
+  }
+  .line.selected::before { background: #fff; height: 2px; top: 4px; }
+  .line.selected span { background: #fff; }
+  .ghost { position: absolute; left: 0; right: 0; height: 1px; background: rgba(77, 163, 255, 0.5); pointer-events: none; display: none; }
+  #preview:hover .ghost.on { display: block; }
+
+  aside { flex: 1; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid #1f1f1f; }
+  #stops { flex: 1; overflow-y: auto; }
+  #stops::-webkit-scrollbar { width: 0; }
+  .hint { padding: 10px 16px; color: #555; font-size: 11px; border-top: 1px solid #1f1f1f; }
+
+  .stop { padding: 14px 16px; border-bottom: 1px solid #1a1a1a; border-left: 2px solid transparent; }
+  .stop.selected { background: #111; border-left-color: #fff; }
+  .stop.active { border-left-color: #ff4d2e; }
+  .stop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .badge { min-width: 18px; height: 18px; padding: 0 5px; background: #4da3ff; color: #000; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+  .selected .badge { background: #fff; }
+  .stop-head .title { color: #bbb; flex: 1; }
+  .grip { color: #444; cursor: grab; font-size: 12px; letter-spacing: -2px; padding: 0 2px; }
+  .grip:hover { color: #bbb; }
+  .stop.dragging { opacity: 0.4; }
+  .stop.drop-before { box-shadow: inset 0 2px 0 #4da3ff; }
+  .stop.drop-after { box-shadow: inset 0 -2px 0 #4da3ff; }
+  body.reordering, body.reordering * { cursor: grabbing !important; }
+  .stop-head .remove { color: #555; font-size: 16px; line-height: 1; padding: 0 2px; }
+  .stop-head .remove:hover { color: #fff; }
+
+  .field { display: grid; grid-template-columns: 64px 1fr 72px; gap: 10px; align-items: center; margin-top: 8px; }
+  .field label { color: #888; }
+  .num {
+    width: 100%; padding: 3px 6px; background: #0b0b0b; border: 1px solid #2a2a2a; outline: 0;
+    text-align: right; font-variant-numeric: tabular-nums; user-select: text;
+  }
+  .num:focus { border-color: #555; }
+  select {
+    grid-column: 2 / -1; width: 100%; padding: 4px 6px; background: #0b0b0b; border: 1px solid #2a2a2a; outline: 0;
+  }
+  .curve { display: grid; grid-template-columns: 64px 1fr; gap: 10px; margin-top: 8px; align-items: center; }
+  .curve svg { width: 56px; height: 56px; background: #0b0b0b; border: 1px solid #1f1f1f; overflow: visible; }
+  .bez { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .bez .num { padding: 3px 2px; text-align: center; }
+  .bez .num::-webkit-inner-spin-button { display: none; }
+
+  input[type=range] { -webkit-appearance: none; width: 100%; height: 16px; background: transparent; }
+  input[type=range]::-webkit-slider-runnable-track { height: 2px; background: #333; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; background: #fff; border: 0; }
+  input[type=range]:focus { outline: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Animation</h1>
+  <span class="meta" id="meta"></span>
+  <button class="btn" id="refresh" title="Recapture the page">Refresh</button>
+  <button class="btn primary" id="play">▶ Play</button>
+  <button id="close" title="Close (⌘.)">×</button>
+</header>
+<main>
+  <div id="preview-wrap">
+    <div id="preview">
+      <div id="shot"></div>
+      <div class="ghost" id="ghost"></div>
+      <div id="marks"></div>
+    </div>
+    <div id="empty">Capturing page…</div>
+  </div>
+  <aside>
+    <div id="stops"></div>
+    <div class="hint">Click the preview to add a line · drag lines to move · drag ⋮⋮ to reorder · ⌫ delete · space play · ⌘↩ play from anywhere · esc stop</div>
+  </aside>
+</main>
+
+<script>
+  const EASINGS = [
+    ['Linear', [0, 0, 1, 1]],
+    ['Ease', [0.25, 0.1, 0.25, 1]],
+    ['Ease in-out · sine', [0.37, 0, 0.63, 1]],
+    ['Ease in-out · cubic', [0.65, 0, 0.35, 1]],
+    ['Ease in-out · quint', [0.83, 0, 0.17, 1]],
+    ['Ease in-out · expo', [0.87, 0, 0.13, 1]],
+    ['Ease out · cubic', [0.33, 1, 0.68, 1]],
+    ['Ease out · expo', [0.16, 1, 0.3, 1]],
+    ['Ease in · cubic', [0.32, 0, 0.67, 0]],
+  ];
+  const DEFAULT_EASING = EASINGS[4][1];
+
+  const $ = (id) => document.getElementById(id);
+  const wrap = $('preview-wrap');
+  const preview = $('preview');
+  const shot = $('shot');
+  const marks = $('marks');
+  const ghost = $('ghost');
+  const list = $('stops');
+
+  let key = null;
+  let stops = [];
+  let selected = 0;
+  let pageInfo = null; // { width, height, viewport }
+  let progress = { playing: false };
+
+  const maxY = () => (pageInfo ? Math.max(0, pageInfo.height - pageInfo.viewport) : 0);
+  const scale = () => (pageInfo ? preview.clientWidth / pageInfo.width : 1);
+  const clampY = (y) => Math.round(Math.max(0, pageInfo ? Math.min(maxY(), y) : y));
+  const sameCurve = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+
+  function newStop(y) {
+    return { y, duration: 1600, easing: [...DEFAULT_EASING], hold: 600 };
+  }
+
+  let saveTimer;
+  function commit() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => narc.save(key, stops), 150);
+    renderMeta();
+  }
+
+  function totalMs() {
+    return stops.reduce((t, s) => t + s.duration + s.hold, 0);
+  }
+
+  function renderMeta() {
+    const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
+    if (!key) return ($('meta').textContent = 'Open a page in the main window first');
+    const count = `${stops.length} line${stops.length === 1 ? '' : 's'}`;
+    $('meta').textContent = progress.playing
+      ? `${secs(progress.elapsed)} / ${secs(progress.total)}`
+      : `${count} · ${secs(totalMs())}`;
+    $('play').textContent = progress.playing ? '■ Stop' : '▶ Play';
+  }
+
+  function renderMarks() {
+    const k = scale();
+    let html = '';
+    const s = stops[selected];
+    if (s && pageInfo && !progress.playing) {
+      html += `<div class="frame selected" style="top:${s.y * k}px;height:${pageInfo.viewport * k}px"></div>`;
+    }
+    if (progress.playing && pageInfo) {
+      html += `<div class="frame playhead" style="top:${progress.y * k}px;height:${pageInfo.viewport * k}px"></div>`;
+    }
+    stops.forEach((stop, i) => {
+      html += `<div class="line${i === selected ? ' selected' : ''}" data-index="${i}" style="top:${stop.y * k}px"><span>${i + 1}</span></div>`;
+    });
+    marks.innerHTML = html;
+  }
+
+  function curveSvg(e) {
+    const [x1, y1, x2, y2] = e;
+    const p = (x, y) => `${x * 56},${56 - y * 56}`;
+    return `<svg viewBox="0 0 56 56">
+      <line x1="0" y1="56" x2="${x1 * 56}" y2="${56 - y1 * 56}" stroke="#444"/>
+      <line x1="56" y1="0" x2="${x2 * 56}" y2="${56 - y2 * 56}" stroke="#444"/>
+      <path d="M${p(0, 0)} C${p(x1, y1)} ${p(x2, y2)} ${p(1, 1)}" fill="none" stroke="#fff" stroke-width="1.5"/>
+    </svg>`;
+  }
+
+  // Times are stored in ms and edited in seconds.
+  const SECONDS = new Set(['duration', 'hold']);
+
+  function field(label, name, ms, min, max) {
+    const value = ms / 1000;
+    return `<div class="field">
+      <label>${label}</label>
+      <input type="range" data-field="${name}" min="${min}" max="${max}" step="0.05" value="${value}">
+      <input class="num" data-field="${name}" type="number" min="${min}" step="0.05" value="${value}" title="seconds">
+    </div>`;
+  }
+
+  function renderList() {
+    if (!stops.length) {
+      list.innerHTML = `<div style="padding:24px 16px;color:#555">No lines yet. Click the preview where the animation should start.</div>`;
+      return;
+    }
+    list.innerHTML = stops.map((s, i) => {
+      const preset = EASINGS.find(([, e]) => sameCurve(e, s.easing));
+      return `<div class="stop${i === selected ? ' selected' : ''}${progress.playing && progress.index === i ? ' active' : ''}" data-index="${i}">
+        <div class="stop-head">
+          <span class="grip" data-grip title="Drag to reorder">⋮⋮</span>
+          <span class="badge">${i + 1}</span>
+          <span class="title">Scroll to</span>
+          <input class="num" style="width:72px" data-field="y" type="number" min="0" value="${s.y}" title="px from top">
+          <button class="remove" data-remove="${i}" title="Delete">×</button>
+        </div>
+        ${field('Duration', 'duration', s.duration, 0.1, 10)}
+        <div class="field"><label>Easing</label>
+          <select data-field="preset">
+            ${EASINGS.map(([name], j) => `<option value="${j}"${preset && preset[0] === name ? ' selected' : ''}>${name}</option>`).join('')}
+            <option value="custom"${preset ? '' : ' selected'}>Custom</option>
+          </select></div>
+          <div class="curve">${curveSvg(s.easing)}
+            <div class="bez">${s.easing.map((v, j) => `<input class="num" data-bez="${j}" type="number" step="0.01" ${j % 2 ? '' : 'min="0" max="1"'} value="${v}">`).join('')}</div>
+          </div>
+        ${field('Hold', 'hold', s.hold, 0, 10)}
+      </div>`;
+    }).join('');
+  }
+
+  function render() {
+    renderMeta();
+    renderMarks();
+    renderList();
+  }
+
+  function select(i, scrollIntoView) {
+    selected = i;
+    for (const el of list.querySelectorAll('.stop')) el.classList.toggle('selected', +el.dataset.index === i);
+    renderMarks();
+    if (scrollIntoView) {
+      const card = list.querySelector(`.stop[data-index="${i}"]`);
+      if (card) card.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  // Editing a card updates the model and the preview without re-rendering the
+  // card, so focused inputs and dragged sliders keep working.
+  list.addEventListener('input', (e) => {
+    const card = e.target.closest('.stop');
+    if (!card) return;
+    const i = +card.dataset.index;
+    const s = stops[i];
+    const f = e.target.dataset.field;
+    if (e.target.dataset.bez !== undefined) {
+      const v = parseFloat(e.target.value);
+      if (Number.isNaN(v)) return;
+      const j = +e.target.dataset.bez;
+      s.easing[j] = j % 2 ? v : Math.max(0, Math.min(1, v));
+      card.querySelector('.curve svg').outerHTML = curveSvg(s.easing);
+      const preset = EASINGS.findIndex(([, ez]) => sameCurve(ez, s.easing));
+      card.querySelector('select').value = preset < 0 ? 'custom' : preset;
+    } else if (f === 'preset') {
+      if (e.target.value === 'custom') return;
+      s.easing = [...EASINGS[+e.target.value][1]];
+      card.querySelector('.curve svg').outerHTML = curveSvg(s.easing);
+      card.querySelectorAll('[data-bez]').forEach((inp, j) => (inp.value = s.easing[j]));
+    } else if (f) {
+      const v = parseFloat(e.target.value);
+      if (Number.isNaN(v)) return;
+      s[f] = f === 'y' ? clampY(v) : Math.round(Math.max(0, v) * 1000);
+      const shown = SECONDS.has(f) ? s[f] / 1000 : s[f];
+      for (const other of card.querySelectorAll(`[data-field="${f}"]`)) if (other !== e.target) other.value = shown;
+      if (f === 'y') renderMarks();
+    }
+    commit();
+  });
+
+  list.addEventListener('change', (e) => {
+    if (e.target.dataset.field === 'y') e.target.value = stops[+e.target.closest('.stop').dataset.index].y;
+  });
+
+  let reorder = null;
+  list.addEventListener('mousedown', (e) => {
+    const grip = e.target.closest('[data-grip]');
+    if (grip && e.button === 0) {
+      e.preventDefault();
+      const card = grip.closest('.stop');
+      reorder = { from: +card.dataset.index, to: +card.dataset.index };
+      card.classList.add('dragging');
+      document.body.classList.add('reordering');
+      return;
+    }
+    const remove = e.target.closest('[data-remove]');
+    if (remove) return removeStop(+remove.dataset.remove);
+    const card = e.target.closest('.stop');
+    if (card && +card.dataset.index !== selected) {
+      select(+card.dataset.index);
+      const s = stops[selected];
+      scrollPreviewTo(s.y);
+    }
+  });
+
+  function removeStop(i) {
+    stops.splice(i, 1);
+    selected = Math.max(0, Math.min(selected >= i ? selected - 1 : selected, stops.length - 1));
+    commit();
+    render();
+  }
+
+  function scrollPreviewTo(y) {
+    const top = y * scale();
+    const view = wrap.clientHeight;
+    if (top < wrap.scrollTop + 40 || top > wrap.scrollTop + view - 40) {
+      wrap.scrollTo({ top: top - view / 3, behavior: 'smooth' });
+    }
+  }
+
+  // Preview: click empty space to add a line, drag a line to move it.
+  const yFromEvent = (e) => clampY((e.clientY - preview.getBoundingClientRect().top) / scale());
+
+  preview.addEventListener('mousemove', (e) => {
+    ghost.classList.toggle('on', !!pageInfo && !e.target.closest('.line') && !drag);
+    ghost.style.top = `${yFromEvent(e) * scale()}px`;
+  });
+
+  let drag = null;
+  preview.addEventListener('mousedown', (e) => {
+    if (!pageInfo || !key || e.button !== 0) return;
+    const line = e.target.closest('.line');
+    let i;
+    if (line) {
+      i = +line.dataset.index;
+    } else {
+      stops.push(newStop(yFromEvent(e)));
+      i = stops.length - 1;
+      commit();
+      renderList();
+    }
+    select(i, true);
+    const startY = e.clientY;
+    const origin = stops[i].y;
+    drag = { i, startY, origin };
+    ghost.classList.remove('on');
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!reorder) return;
+    const cards = [...list.querySelectorAll('.stop')];
+    let to = cards.length;
+    for (const card of cards) {
+      const r = card.getBoundingClientRect();
+      if (e.clientY < r.top + r.height / 2) {
+        to = +card.dataset.index;
+        break;
+      }
+    }
+    reorder.to = to;
+    for (const card of cards) {
+      const i = +card.dataset.index;
+      const noop = to === reorder.from || to === reorder.from + 1;
+      card.classList.toggle('drop-before', !noop && i === to);
+      card.classList.toggle('drop-after', !noop && to === cards.length && i === cards.length - 1);
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!reorder) return;
+    const { from, to } = reorder;
+    reorder = null;
+    document.body.classList.remove('reordering');
+    const target = to > from ? to - 1 : to;
+    if (target !== from) {
+      const [moved] = stops.splice(from, 1);
+      stops.splice(target, 0, moved);
+      selected = target;
+      commit();
+    }
+    render();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    stops[drag.i].y = clampY(drag.origin + (e.clientY - drag.startY) / scale());
+    const input = list.querySelector(`.stop[data-index="${drag.i}"] [data-field="y"]`);
+    if (input) input.value = stops[drag.i].y;
+    renderMarks();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag = null;
+    commit();
+  });
+
+  function togglePlay() {
+    if (progress.playing) return narc.stop();
+    clearTimeout(saveTimer);
+    narc.save(key, stops);
+    narc.play();
+  }
+
+  $('play').addEventListener('click', togglePlay);
+  $('refresh').addEventListener('click', () => capture());
+  $('close').addEventListener('click', () => narc.close());
+
+  window.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, select')) return;
+    if (e.key === ' ') {
+      e.preventDefault();
+      togglePlay();
+    } else if ((e.key === 'Backspace' || e.key === 'Delete') && stops.length) {
+      removeStop(selected);
+    } else if (e.key === 'Escape') {
+      narc.stop();
+    } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && stops.length) {
+      e.preventDefault();
+      if (e.altKey || e.shiftKey) {
+        const step = e.shiftKey ? 100 : 10;
+        stops[selected].y = clampY(stops[selected].y + (e.key === 'ArrowUp' ? -step : step));
+        commit();
+        render();
+      } else {
+        select(Math.max(0, Math.min(stops.length - 1, selected + (e.key === 'ArrowUp' ? -1 : 1))), true);
+        scrollPreviewTo(stops[selected].y);
+      }
+    }
+  });
+
+  narc.onProgress((p) => {
+    const wasPlaying = progress.playing;
+    const lastIndex = progress.index;
+    progress = p.playing ? p : { playing: false };
+    renderMeta();
+    renderMarks();
+    if (p.playing) {
+      scrollPreviewTo(p.y);
+      if (!wasPlaying || lastIndex !== p.index) renderList();
+    } else if (wasPlaying) {
+      renderList();
+    }
+  });
+
+  window.addEventListener('resize', renderMarks);
+
+  let captureId = 0;
+  async function capture() {
+    const id = ++captureId;
+    $('empty').style.display = 'flex';
+    $('empty').textContent = 'Capturing page…';
+    try {
+      const info = await narc.capture();
+      if (id !== captureId) return;
+      pageInfo = info;
+      shot.innerHTML = info.tiles.map((t) => `<img src="${t.src}" style="aspect-ratio:${info.width}/${t.height}">`).join('');
+      $('empty').style.display = 'none';
+      for (const s of stops) s.y = clampY(s.y);
+      render();
+    } catch (err) {
+      if (id !== captureId) return;
+      $('empty').textContent = `Couldn't capture the page.\n${err.message || err}`;
+    }
+  }
+
+  async function load() {
+    const data = await narc.load();
+    key = data.key;
+    stops = data.stops;
+    selected = 0;
+    pageInfo = null;
+    shot.innerHTML = '';
+    render();
+    if (key) capture();
+    else {
+      $('empty').style.display = 'flex';
+      $('empty').textContent = 'Open a page in the main window (⌘L), then come back.';
+    }
+  }
+
+  let reloadTimer;
+  narc.onPageChanged(() => {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(load, 400);
+  });
+
+  load();
+</script>
+</body>
+</html>

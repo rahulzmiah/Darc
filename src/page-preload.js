@@ -165,6 +165,7 @@ function isTrackpad(e) {
 // Bubble phase on window: runs after the site's own handlers, so anything the
 // page already claimed (maps, carousels, custom scrollers) is left alone.
 window.addEventListener('wheel', (e) => {
+  if (playback) stopPlayback();
   if (e.defaultPrevented || e.ctrlKey || siteHasOwnSmoothScroll()) return;
   const unit = e.deltaMode === 1 ? LINE_HEIGHT : e.deltaMode === 2 ? window.innerHeight : 1;
   const speed = isTrackpad(e) ? settings.trackpadSpeed : settings.mouseSpeed;
@@ -184,6 +185,12 @@ function isEditable(el) {
 }
 
 window.addEventListener('keydown', (e) => {
+  if (playback && e.key === 'Escape') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    stopPlayback();
+    return;
+  }
   if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
   let active = document.activeElement;
   while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
@@ -215,3 +222,73 @@ window.addEventListener('keydown', (e) => {
   const max = maxScroll(el);
   scrollBy(el, Math.max(-max.x, Math.min(max.x, dx)), Math.max(-max.y, Math.min(max.y, dy)));
 });
+
+// Scripted scroll animation from the animation panel: ease from wherever the
+// page is to each stop in turn with per-stop cubic-bezier curves, durations and holds.
+function cubicBezier(x1, y1, x2, y2) {
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const sampleX = (t) => ((ax * t + bx) * t + cx) * t;
+  const sampleY = (t) => ((ay * t + by) * t + cy) * t;
+  const slopeX = (t) => (3 * ax * t + 2 * bx) * t + cx;
+  return (x) => {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    let t = x;
+    for (let i = 0; i < 8; i++) {
+      const err = sampleX(t) - x;
+      if (Math.abs(err) < 1e-6) return sampleY(t);
+      const d = slopeX(t);
+      if (Math.abs(d) < 1e-6) break;
+      t -= err / d;
+    }
+    let lo = 0, hi = 1;
+    t = x;
+    while (hi - lo > 1e-6) {
+      if (sampleX(t) < x) lo = t;
+      else hi = t;
+      t = (lo + hi) / 2;
+    }
+    return sampleY(t);
+  };
+}
+
+let playback = null;
+
+function stopPlayback() {
+  if (!playback) return;
+  cancelAnimationFrame(playback.raf);
+  playback = null;
+  ipcRenderer.send('anim:progress', { playing: false });
+}
+
+function play(stops) {
+  stopPlayback();
+  const el = root();
+  animations.delete(el);
+  const segments = [];
+  let t = 0;
+  stops.forEach((stop, i) => {
+    const duration = Math.max(0, stop.duration);
+    const from = i ? stops[i - 1].y : el.scrollTop;
+    segments.push({ start: t, end: t + duration, from, to: stop.y, ease: cubicBezier(...stop.easing), index: i });
+    t += duration;
+    segments.push({ start: t, end: t + Math.max(0, stop.hold), from: stop.y, to: stop.y, ease: (p) => p, index: i });
+    t += Math.max(0, stop.hold);
+  });
+  playback = { segments, total: t, start: performance.now(), raf: 0 };
+  const tick = (now) => {
+    const elapsed = now - playback.start;
+    const seg = segments.find((s) => elapsed < s.end) || segments[segments.length - 1];
+    const p = seg.end > seg.start ? Math.min(1, Math.max(0, (elapsed - seg.start) / (seg.end - seg.start))) : 1;
+    const y = Math.max(0, Math.min(maxScroll(el).y, seg.from + (seg.to - seg.from) * seg.ease(p)));
+    el.scrollTo({ top: y, behavior: 'instant' });
+    ipcRenderer.send('anim:progress', { playing: true, y, elapsed: Math.min(elapsed, t), total: t, index: seg.index });
+    if (elapsed >= t) stopPlayback();
+    else playback.raf = requestAnimationFrame(tick);
+  };
+  tick(playback.start);
+}
+
+ipcRenderer.on('anim:play', (_e, stops) => play(stops));
+ipcRenderer.on('anim:stop', stopPlayback);

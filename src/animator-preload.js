@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld('narc', {
   stop: () => ipcRenderer.send('anim:stop'),
   close: () => ipcRenderer.send('anim:close'),
   onPageChanged: (cb) => ipcRenderer.on('anim:page-changed', () => cb()),
+  onAddStop: (cb) => ipcRenderer.on('anim:add-stop', (_e, data) => cb(data)),
   onProgress: (cb) => ipcRenderer.on('anim:progress', (_e, data) => cb(data)),
 });

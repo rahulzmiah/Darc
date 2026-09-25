@@ -196,6 +196,17 @@ window.addEventListener('keydown', (e) => {
   while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
   if (isEditable(active)) return;
 
+  // Space plays the page's scroll animation (or stops it) instead of paging,
+  // so recordings don't need the animation panel on screen.
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (!e.repeat) {
+      if (playback) stopPlayback();
+      else ipcRenderer.send('anim:play');
+    }
+    return;
+  }
+
   const page = window.innerHeight * 0.85;
   const step = 120 * settings.keyboardSpeed;
   let dx = 0;
@@ -209,10 +220,6 @@ window.addEventListener('keydown', (e) => {
     case 'PageUp': dy = -page; break;
     case 'Home': dy = -Infinity; break;
     case 'End': dy = Infinity; break;
-    case ' ':
-      if (active && active.closest && active.closest('button, a, summary, [role="button"]')) return;
-      dy = e.shiftKey ? -page : page;
-      break;
     default: return;
   }
   const start = active && active !== document.body ? active : document.body || document.documentElement;
@@ -292,3 +299,8 @@ function play(stops) {
 
 ipcRenderer.on('anim:play', (_e, stops) => play(stops));
 ipcRenderer.on('anim:stop', stopPlayback);
+ipcRenderer.on('anim:get-scroll', () => {
+  const el = root();
+  const anim = !playback && animations.get(el);
+  ipcRenderer.send('anim:scroll', Math.round(anim ? anim.target.y : el.scrollTop));
+});

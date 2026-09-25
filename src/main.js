@@ -21,7 +21,7 @@ if (!fs.existsSync(storePath) && fs.existsSync(legacyStorePath)) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
   fs.copyFileSync(legacyStorePath, storePath);
 }
-let store = { settings: { ...DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorBounds: null };
+let store = { settings: { ...DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorWidth: 680 };
 try {
   const saved = JSON.parse(fs.readFileSync(storePath, 'utf8'));
   store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings } };
@@ -127,23 +127,27 @@ function sendToAnimator(channel, data) {
   if (animator && !animator.isDestroyed()) animator.webContents.send(channel, data);
 }
 
+// Open the panel docked against the right edge of the main window, matching its
+// height and clamped to the display's work area so it never lands off-screen.
+function animatorDock() {
+  const main = win.getBounds();
+  const area = screen.getDisplayMatching(main).workArea;
+  const gap = 8;
+  const width = Math.min(Math.max(store.animatorWidth || 680, 560), area.width);
+  const top = Math.max(area.y, main.y);
+  const height = Math.max(420, Math.min(main.y + main.height, area.y + area.height) - top);
+  const x = Math.max(Math.min(main.x + main.width + gap, area.x + area.width - width), area.x);
+  return { x, y: Math.min(top, area.y + area.height - height), width, height };
+}
+
 function toggleAnimator() {
   if (animator && !animator.isDestroyed()) {
     if (animator.isFocused()) animator.close();
     else animator.focus();
     return;
   }
-  let bounds = store.animatorBounds;
-  if (!bounds) {
-    const main = win.getBounds();
-    const area = screen.getDisplayMatching(main).workArea;
-    const width = 680;
-    const height = Math.min(880, area.height);
-    const x = main.x + main.width + 12 + width <= area.x + area.width ? main.x + main.width + 12 : area.x + area.width - width;
-    bounds = { x, y: Math.max(area.y, main.y), width, height };
-  }
   animator = new BrowserWindow({
-    ...bounds,
+    ...animatorDock(),
     minWidth: 560,
     minHeight: 420,
     title: 'Animation',
@@ -158,12 +162,10 @@ function toggleAnimator() {
     },
   });
   animator.loadFile(path.join(__dirname, 'animator.html'));
-  const remember = () => {
-    store.animatorBounds = animator.getBounds();
+  animator.on('resized', () => {
+    store.animatorWidth = animator.getBounds().width;
     save();
-  };
-  animator.on('moved', remember);
-  animator.on('resized', remember);
+  });
   animator.on('closed', () => {
     animator = null;
   });
@@ -171,9 +173,12 @@ function toggleAnimator() {
 
 // Full-length screenshot of the page, downscaled for the animation panel.
 // Taken from a hidden offscreen copy of the page: capturing beyond the viewport
-// on the live view can freeze its rendering for ~30s. Captured in tiles
-// because a single very tall capture hangs Chromium.
-const PREVIEW_TILE = 4000;
+// on the live view can freeze its rendering for ~30s. The copy is scrolled down
+// one screen at a time and each screen captured in place, because many sites
+// change layout as they scroll (sticky headers shrinking, sections growing on
+// reveal) — a single capture from the top would drift from what playback shows.
+const PREVIEW_SETTLE = 350; // ms for scroll-driven interactions to catch up
+const PREVIEW_MAX_SCREENS = 60;
 const withTimeout = (promise, ms) => {
   let timer;
   return Promise.race([
@@ -203,27 +208,81 @@ async function capturePreview() {
       await wc.insertCSS('::-webkit-scrollbar{display:none!important}*{scrollbar-width:none!important}', { cssOrigin: 'user' });
     }
     await new Promise((r) => setTimeout(r, 600)); // let fonts and late layout settle
-    const info = await wc.executeJavaScript(`(() => {
+    // Past the first screen, small fixed/sticky bars (headers, chat bubbles) are
+    // hidden so they aren't stamped onto every screen of the stitched preview.
+    // Big ones are left alone — they're backgrounds or pinned scroll sections.
+    const scrollTo = (y) => wc.executeJavaScript(`new Promise((resolve) => {
       const el = document.scrollingElement || document.documentElement;
-      return { width: innerWidth, height: el.scrollHeight, viewport: innerHeight, dpr: devicePixelRatio };
-    })()`);
-    const scale = Math.min(1, 640 / (info.width * info.dpr));
-    wc.debugger.attach('1.3');
+      el.scrollTo({ top: ${y}, behavior: 'instant' });
+      if (${y} > 0) {
+        for (const n of document.querySelectorAll('body *')) {
+          const pos = getComputedStyle(n).position;
+          if ((pos === 'fixed' || pos === 'sticky') && n.getBoundingClientRect().height < innerHeight * 0.4) {
+            n.style.setProperty('visibility', 'hidden', 'important');
+          }
+        }
+      }
+      setTimeout(() => resolve({ top: el.scrollTop, height: el.scrollHeight, width: innerWidth, viewport: innerHeight }), ${PREVIEW_SETTLE});
+    })`);
     const tiles = [];
-    for (let y = 0; y < info.height; y += PREVIEW_TILE) {
-      const tileHeight = Math.min(PREVIEW_TILE, info.height - y);
-      const { data } = await withTimeout(wc.debugger.sendCommand('Page.captureScreenshot', {
-        format: 'jpeg',
-        quality: 82,
-        captureBeyondViewport: true,
-        clip: { x: 0, y, width: info.width, height: tileHeight, scale },
-      }), 10000);
-      tiles.push({ src: `data:image/jpeg;base64,${data}`, height: tileHeight });
+    let covered = 0; // page px captured so far
+    let info;
+    for (let i = 0; i < PREVIEW_MAX_SCREENS; i++) {
+      info = await scrollTo(covered);
+      // At the bottom the scroll clamps short, overlapping the last screen.
+      const skip = Math.max(0, covered - info.top);
+      const tileHeight = info.viewport - skip;
+      if (tileHeight <= 0) break;
+      const image = await withTimeout(wc.capturePage(), 10000);
+      const px = image.getSize().width / info.width;
+      const tile = image
+        .crop({ x: 0, y: Math.round(skip * px), width: image.getSize().width, height: Math.round(tileHeight * px) })
+        .resize({ width: Math.min(640, image.getSize().width), quality: 'good' });
+      tiles.push({ src: `data:image/jpeg;base64,${tile.toJPEG(82).toString('base64')}`, height: tileHeight });
+      covered = info.top + info.viewport;
+      if (covered >= info.height - 1) break;
     }
-    return { tiles, ...info };
+    return { tiles, width: info.width, height: covered, viewport: info.viewport };
   } finally {
     copy.destroy();
   }
+}
+
+// Ask the page for its scroll position — the smooth-scroll target if a scroll
+// is still settling, so a marker lands where the user was heading.
+function pageScrollY() {
+  const wc = page.webContents;
+  return new Promise((resolve) => {
+    const done = (y) => {
+      clearTimeout(timer);
+      ipcMain.removeListener('anim:scroll', onReply);
+      resolve(y);
+    };
+    const onReply = (e, y) => e.sender === wc && done(y);
+    const timer = setTimeout(() => done(null), 500);
+    ipcMain.on('anim:scroll', onReply);
+    wc.send('anim:get-scroll');
+  });
+}
+
+// Record mode: scroll the page, then drop a marker at the current position —
+// same as clicking the preview in the animation panel.
+async function setMarker() {
+  const key = animationKey();
+  if (!key) return showToast('Open a page first · ⌘L');
+  const y = await pageScrollY();
+  if (y == null) return;
+  if (animator && !animator.isDestroyed()) {
+    // The panel owns the stops while it's open; let it add the marker so its
+    // pending edits aren't clobbered.
+    sendToAnimator('anim:add-stop', { key, y });
+  } else {
+    const stops = store.animations[key] || [];
+    stops.push({ y, duration: 1600, easing: [0.83, 0, 0.17, 1], hold: 600 });
+    store.animations[key] = stops;
+    save();
+  }
+  showToast(`Marker set · ${y}px`);
 }
 
 function playAnimation() {
@@ -280,6 +339,8 @@ function buildMenu() {
       label: 'Animation',
       submenu: [
         { label: 'Animation Panel', accelerator: 'CmdOrCtrl+.', click: toggleAnimator },
+        { type: 'separator' },
+        { label: 'Set Marker', accelerator: 'CmdOrCtrl+K', click: setMarker },
         { type: 'separator' },
         { label: 'Play', accelerator: 'CmdOrCtrl+Enter', click: playAnimation },
         { label: 'Stop', accelerator: 'Shift+CmdOrCtrl+.', click: () => page.webContents.send('anim:stop') },

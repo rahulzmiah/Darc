@@ -28,6 +28,8 @@
   header button { -webkit-app-region: no-drag; }
   .btn { padding: 5px 10px; border: 1px solid #333; color: #bbb; }
   .btn:hover { color: #fff; border-color: #555; }
+  .btn:disabled { opacity: 0.35; pointer-events: none; }
+  .btn.confirm { color: #ff4d2e; border-color: #ff4d2e; }
   .btn.primary { background: #fff; color: #000; border-color: #fff; min-width: 64px; }
   .btn.primary:hover { background: #ddd; }
   #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
@@ -61,6 +63,10 @@
   aside { flex: 1; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid #1f1f1f; }
   #stops { flex: 1; overflow-y: auto; }
   #stops::-webkit-scrollbar { width: 0; }
+  label.advanced { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid #1f1f1f; color: #888; cursor: pointer; }
+  label.advanced:hover { color: #bbb; }
+  label.advanced input { margin: 0; accent-color: #fff; }
+  body:not(.advanced) .easing { display: none; }
   .hint { padding: 10px 16px; color: #555; font-size: 11px; border-top: 1px solid #1f1f1f; }
 
   .stop { padding: 14px 16px; border-bottom: 1px solid #1a1a1a; border-left: 2px solid transparent; }
@@ -105,6 +111,7 @@
 <header>
   <h1>Animation</h1>
   <span class="meta" id="meta"></span>
+  <button class="btn" id="clear" title="Remove every line">Clear</button>
   <button class="btn" id="refresh" title="Recapture the page">Refresh</button>
   <button class="btn primary" id="play">▶ Play</button>
   <button id="close" title="Close (⌘.)">×</button>
@@ -120,7 +127,8 @@
   </div>
   <aside>
     <div id="stops"></div>
-    <div class="hint">Click the preview to add a line · drag lines to move · drag ⋮⋮ to reorder · ⌫ delete · space play · ⌘↩ play from anywhere · esc stop</div>
+    <label class="advanced"><input type="checkbox" id="advanced"> Advanced options</label>
+    <div class="hint">Click the preview or scroll the page and press ⌘K to add a line · drag lines to move · drag ⋮⋮ to reorder · ⌫ delete · space play (here or in the page) · esc stop</div>
   </aside>
 </main>
 
@@ -136,7 +144,7 @@
     ['Ease out · expo', [0.16, 1, 0.3, 1]],
     ['Ease in · cubic', [0.32, 0, 0.67, 0]],
   ];
-  const DEFAULT_EASING = EASINGS[4][1];
+  const DEFAULT_EASING = EASINGS.find(([name]) => name === 'Ease in-out · expo')[1];
 
   const $ = (id) => document.getElementById(id);
   const wrap = $('preview-wrap');
@@ -145,6 +153,16 @@
   const marks = $('marks');
   const ghost = $('ghost');
   const list = $('stops');
+
+  // Easing controls are hidden unless advanced options are on.
+  const advanced = $('advanced');
+  advanced.checked = localStorage.getItem('narc.animator.advanced') === '1';
+  document.body.classList.toggle('advanced', advanced.checked);
+  advanced.addEventListener('change', () => {
+    document.body.classList.toggle('advanced', advanced.checked);
+    localStorage.setItem('narc.animator.advanced', advanced.checked ? '1' : '0');
+    advanced.blur(); // keep keyboard shortcuts working
+  });
 
   let key = null;
   let stops = [];
@@ -180,6 +198,7 @@
       ? `${secs(progress.elapsed)} / ${secs(progress.total)}`
       : `${count} · ${secs(totalMs())}`;
     $('play').textContent = progress.playing ? '■ Stop' : '▶ Play';
+    $('clear').disabled = !stops.length;
   }
 
   function renderMarks() {
@@ -236,14 +255,14 @@
           <button class="remove" data-remove="${i}" title="Delete">×</button>
         </div>
         ${field('Duration', 'duration', s.duration, 0.1, 10)}
-        <div class="field"><label>Easing</label>
+        <div class="easing"><div class="field"><label>Easing</label>
           <select data-field="preset">
             ${EASINGS.map(([name], j) => `<option value="${j}"${preset && preset[0] === name ? ' selected' : ''}>${name}</option>`).join('')}
             <option value="custom"${preset ? '' : ' selected'}>Custom</option>
           </select></div>
           <div class="curve">${curveSvg(s.easing)}
             <div class="bez">${s.easing.map((v, j) => `<input class="num" data-bez="${j}" type="number" step="0.01" ${j % 2 ? '' : 'min="0" max="1"'} value="${v}">`).join('')}</div>
-          </div>
+          </div></div>
         ${field('Hold', 'hold', s.hold, 0, 10)}
       </div>`;
     }).join('');
@@ -424,6 +443,37 @@
 
   $('play').addEventListener('click', togglePlay);
   $('refresh').addEventListener('click', () => capture());
+
+  // Clear takes a second click to confirm, since it wipes the whole track.
+  let clearTimer;
+  function resetClear() {
+    clearTimeout(clearTimer);
+    $('clear').classList.remove('confirm');
+    $('clear').textContent = 'Clear';
+  }
+  $('clear').addEventListener('click', () => {
+    if (!$('clear').classList.contains('confirm')) {
+      $('clear').classList.add('confirm');
+      $('clear').textContent = 'Clear all?';
+      clearTimer = setTimeout(resetClear, 2500);
+      return;
+    }
+    resetClear();
+    if (progress.playing) narc.stop();
+    stops = [];
+    selected = 0;
+    commit();
+    render();
+  });
+
+  narc.onAddStop((data) => {
+    if (data.key !== key) return;
+    stops.push(newStop(clampY(data.y)));
+    commit();
+    render();
+    select(stops.length - 1, true);
+    scrollPreviewTo(stops[selected].y);
+  });
   $('close').addEventListener('click', () => narc.close());
 
   window.addEventListener('keydown', (e) => {

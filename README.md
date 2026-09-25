@@ -5,7 +5,22 @@ A chrome-less Chromium browser for recording websites. No tabs, no toolbar, shar
 ```sh
 npm install
 npm start        # run from source
-npm run package  # build dist/Darc-darwin-*/Darc.app
+npm run dist     # build dist/Darc-<version>.dmg (universal: Apple Silicon + Intel)
+```
+
+## Installing
+
+Download `Darc-<version>.dmg` from [Releases](https://github.com/rahulzmiah/Narc/releases), open it, and drag Darc into Applications.
+
+The app is ad-hoc signed, not notarized, so the first launch is blocked. Open **System Settings → Privacy & Security** and click **Open Anyway**. You can also run `xattr -dr com.apple.quarantine /Applications/Darc.app` once.
+
+## Releasing
+
+Bump `version` in `package.json`, commit, then:
+
+```sh
+git tag v<version> && git push origin main --tags
+gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 ```
 
 | Shortcut | Action |

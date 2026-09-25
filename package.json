@@ -7,7 +7,8 @@
   "private": true,
   "scripts": {
     "start": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "package": "electron-packager . Darc --platform=darwin --icon=assets/icon.icns --app-bundle-id=com.rahulmiah.darc --out=dist --overwrite --ignore=\"^/dist\" --ignore=\"^/assets/logo.png\""
+    "dist": "electron-builder --mac --universal",
+    "release": "electron-builder --mac --universal --publish always"
   },
   "repository": {
     "type": "git",
@@ -16,7 +17,53 @@
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
-    "@electron/packager": "^20.3.0",
-    "electron": "^44.4.5"
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.rahulmiah.darc",
+    "productName": "Darc",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.video",
+      "identity": "-",
+      "target": [
+        "dmg"
+      ],
+      "hardenedRuntime": false
+    },
+    "dmg": {
+      "title": "Darc ${version}",
+      "artifactName": "Darc-${version}.dmg",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 140,
+          "y": 190
+        },
+        {
+          "x": 400,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "rahulzmiah",
+      "repo": "Narc",
+      "releaseType": "release"
+    }
   }
 }

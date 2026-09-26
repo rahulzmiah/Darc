@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('narc', {
   save: (key, stops) => ipcRenderer.send('anim:set', { key, stops }),
   play: () => ipcRenderer.send('anim:play'),
   stop: () => ipcRenderer.send('anim:stop'),
+  seek: (y) => ipcRenderer.send('anim:seek', y),
   close: () => ipcRenderer.send('anim:close'),
   onPageChanged: (cb) => ipcRenderer.on('anim:page-changed', () => cb()),
   onAddStop: (cb) => ipcRenderer.on('anim:add-stop', (_e, data) => cb(data)),

@@ -47,7 +47,13 @@
   #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #555; text-align: center; padding: 24px; white-space: pre-line; }
 
   .frame { position: absolute; left: 0; right: 0; pointer-events: none; }
-  .frame.selected { background: rgba(255, 255, 255, 0.06); outline: 1px dashed rgba(255, 255, 255, 0.35); }
+  .frame.selected { outline: 2px solid #4da3ff; background: rgba(77, 163, 255, 0.08); }
+  .frame .navbar {
+    position: absolute; left: 0; right: 0; top: 0;
+    background: repeating-linear-gradient(135deg, rgba(128, 128, 128, 0.55) 0 4px, rgba(128, 128, 128, 0.4) 4px 8px);
+    border-bottom: 1px solid rgba(200, 200, 200, 0.6);
+    color: #eee; font-size: 9px; line-height: 1; padding: 2px 4px; overflow: hidden; white-space: nowrap;
+  }
   .frame.playhead { outline: 2px solid #ff4d2e; background: rgba(255, 77, 46, 0.06); }
   .line { position: absolute; left: -8px; right: -8px; height: 11px; margin-top: -5px; cursor: ns-resize; }
   .line::before { content: ""; position: absolute; left: 8px; right: 8px; top: 5px; height: 1px; background: #4da3ff; }
@@ -255,7 +261,11 @@
     let html = '';
     const s = stops[selected];
     if (s && pageInfo && !progress.playing) {
-      html += `<div class="frame selected" style="top:${s.y * k}px;height:${pageInfo.viewport * k}px"></div>`;
+      // Grey band for the sticky navbar that will cover the top of the viewport.
+      const nav = pageInfo.navbar
+        ? `<div class="navbar" style="height:${pageInfo.navbar * k}px">${pageInfo.navbar * k >= 11 ? `Navbar ${pageInfo.navbar}px` : ''}</div>`
+        : '';
+      html += `<div class="frame selected" style="top:${s.y * k}px;height:${pageInfo.viewport * k}px">${nav}</div>`;
     }
     if (progress.playing && pageInfo) {
       html += `<div class="frame playhead" style="top:${progress.y * k}px;height:${pageInfo.viewport * k}px"></div>`;
@@ -344,7 +354,10 @@
   });
 
   list.addEventListener('change', (e) => {
-    if (e.target.dataset.field === 'y') e.target.value = stops[+e.target.closest('.stop').dataset.index].y;
+    if (e.target.dataset.field === 'y') {
+      e.target.value = stops[+e.target.closest('.stop').dataset.index].y;
+      seek();
+    }
   });
 
   let reorder = null;
@@ -361,12 +374,21 @@
     const remove = e.target.closest('[data-remove]');
     if (remove) return removeStop(+remove.dataset.remove);
     const card = e.target.closest('.stop');
-    if (card && +card.dataset.index !== selected) {
-      select(+card.dataset.index);
-      const s = stops[selected];
-      scrollPreviewTo(s.y);
+    if (card) {
+      if (+card.dataset.index !== selected) {
+        select(+card.dataset.index);
+        scrollPreviewTo(stops[selected].y);
+      }
+      seek();
     }
   });
+
+  // Glide the live page to the selected marker.
+  function seek() {
+    const s = stops[selected];
+    if (!s || progress.playing) return;
+    narc.seek(s.y);
+  }
 
   function removeStop(i) {
     stops.splice(i, 1);
@@ -409,6 +431,7 @@
     const origin = stops[i].y;
     drag = { i, startY, origin };
     ghost.classList.remove('on');
+    seek();
     e.preventDefault();
   });
 
@@ -457,8 +480,10 @@
 
   window.addEventListener('mouseup', () => {
     if (!drag) return;
+    const moved = stops[drag.i].y !== drag.origin;
     drag = null;
     commit();
+    if (moved) seek();
   });
 
   function togglePlay() {
@@ -527,6 +552,7 @@
         select(Math.max(0, Math.min(stops.length - 1, selected + (e.key === 'ArrowUp' ? -1 : 1))), true);
         scrollPreviewTo(stops[selected].y);
       }
+      seek();
     }
   });
 

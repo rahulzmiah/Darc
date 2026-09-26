@@ -255,6 +255,35 @@ async function capturePreview(job) {
       resolve();
     })`), 30000);
     alive();
+    // Measure any sticky/fixed navbar pinned to the top once the page has been
+    // scrolled a screen down, so the panel can show how much of the viewport it covers.
+    const navbar = await withTimeout(wc.executeJavaScript(`new Promise(async (resolve) => {
+      const el = document.scrollingElement || document.documentElement;
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      el.scrollTo({ top: Math.min(innerHeight, el.scrollHeight - innerHeight), behavior: 'instant' });
+      await wait(${PREVIEW_SETTLE});
+      let bottom = 0;
+      for (const n of document.querySelectorAll('body *')) {
+        const cs = getComputedStyle(n);
+        if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+        if (cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0) continue;
+        let r = n.getBoundingClientRect();
+        if (r.height < 1) {
+          // Zero-height fixed wrappers: use their visible children instead.
+          for (const c of n.children) {
+            const cr = c.getBoundingClientRect();
+            if (cr.height >= 1 && cr.width > r.width) r = cr;
+          }
+        }
+        if (r.top > 1 || r.bottom <= 0 || r.height < 1) continue;
+        if (r.width < innerWidth * 0.5 || r.height > innerHeight * 0.4) continue;
+        bottom = Math.max(bottom, r.bottom);
+      }
+      el.scrollTo({ top: 0, behavior: 'instant' });
+      await wait(300);
+      resolve(Math.round(bottom));
+    })`), 10000).catch(() => 0);
+    alive();
     // Past the first screen, small fixed/sticky bars (headers, chat bubbles) are
     // hidden so they aren't stamped onto every screen of the stitched preview.
     // Big ones are left alone — they're backgrounds or pinned scroll sections.
@@ -291,7 +320,7 @@ async function capturePreview(job) {
       if (covered >= info.height - 1) break;
     }
     alive();
-    return { tiles, width: info.width, height: covered, viewport: info.viewport };
+    return { tiles, width: info.width, height: covered, viewport: info.viewport, navbar };
   } finally {
     copy.destroy();
   }
@@ -566,13 +595,10 @@ function createWindow() {
   wc.on('did-finish-load', invalidatePreview);
   wc.on('did-navigate-in-page', schedulePreview);
 
+  // Always start blank with the URL bar open rather than reopening the last site.
   overlay.webContents.loadFile(path.join(__dirname, 'overlay.html'));
-  if (store.lastUrl) {
-    wc.loadURL(store.lastUrl);
-  } else {
-    wc.loadURL(BLANK_PAGE);
-    overlay.webContents.once('did-finish-load', () => showOverlay('url'));
-  }
+  wc.loadURL(BLANK_PAGE);
+  overlay.webContents.once('did-finish-load', () => showOverlay('url'));
 }
 
 ipcMain.on('settings:get', (e) => {
@@ -629,6 +655,7 @@ ipcMain.on('anim:set', (_e, { key, stops }) => {
 ipcMain.on('anim:play', playAnimation);
 ipcMain.on('anim:close', () => animator && animator.close());
 ipcMain.on('anim:stop', () => page.webContents.send('anim:stop'));
+ipcMain.on('anim:seek', (_e, y) => page.webContents.send('anim:seek', y));
 ipcMain.on('anim:progress', (_e, data) => sendToAnimator('anim:progress', data));
 
 app.whenReady().then(() => {

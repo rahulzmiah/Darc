@@ -299,6 +299,17 @@ function play(stops) {
 
 ipcRenderer.on('anim:play', (_e, stops) => play(stops));
 ipcRenderer.on('anim:stop', stopPlayback);
+// Selecting a marker in the animation panel glides the page to it.
+ipcRenderer.on('anim:seek', (_e, y) => {
+  stopPlayback();
+  const el = root();
+  const s = stateFor(el);
+  s.target.y = Math.max(0, Math.min(maxScroll(el).y, y));
+  if (!rafId) {
+    lastFrame = performance.now();
+    rafId = requestAnimationFrame(frame);
+  }
+});
 ipcRenderer.on('anim:get-scroll', () => {
   const el = root();
   const anim = !playback && animations.get(el);

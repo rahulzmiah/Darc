@@ -8,7 +8,12 @@ contextBridge.exposeInMainWorld('narc', {
   stop: () => ipcRenderer.send('anim:stop'),
   seek: (y) => ipcRenderer.send('anim:seek', y),
   close: () => ipcRenderer.send('anim:close'),
+  record: () => ipcRenderer.send('rec:toggle'),
+  onRecordState: (cb) => ipcRenderer.on('rec:state', (_e, on) => cb(on)),
   onPageChanged: (cb) => ipcRenderer.on('anim:page-changed', () => cb()),
   onAddStop: (cb) => ipcRenderer.on('anim:add-stop', (_e, data) => cb(data)),
   onProgress: (cb) => ipcRenderer.on('anim:progress', (_e, data) => cb(data)),
+  cursorGet: () => ipcRenderer.invoke('cursor:get'),
+  cursorSet: (partial) => ipcRenderer.send('cursor:set', partial),
+  cursorPick: () => ipcRenderer.invoke('cursor:pick'),
 });

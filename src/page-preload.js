@@ -315,3 +315,122 @@ ipcRenderer.on('anim:get-scroll', () => {
   const anim = !playback && animations.get(el);
   ipcRenderer.send('anim:scroll', Math.round(anim ? anim.target.y : el.scrollTop));
 });
+
+// While recording, report the root scroll velocity every frame so the
+// recorder can add motion blur along the direction of travel.
+let motion = false;
+let motionRaf = 0;
+let motionLast = null;
+let motionMoving = false;
+function motionFrame(now) {
+  if (!motion) {
+    motionRaf = 0;
+    return;
+  }
+  const el = root();
+  const pos = { x: el.scrollLeft, y: el.scrollTop, t: now };
+  if (motionLast) {
+    const dt = (now - motionLast.t) / 1000;
+    if (dt > 0) {
+      const dx = pos.x - motionLast.x;
+      const dy = pos.y - motionLast.y;
+      // A jump of half a screen or more in one frame is a teleport (page
+      // transition, anchor link, scroll restore), not motion to blur.
+      const jump = Math.abs(dx) > innerWidth / 2 || Math.abs(dy) > innerHeight / 2;
+      const vx = jump ? 0 : dx / dt;
+      const vy = jump ? 0 : dy / dt;
+      const moving = vx !== 0 || vy !== 0;
+      if (moving || motionMoving || jump) ipcRenderer.send('rec:velocity', { vx, vy, jump });
+      motionMoving = moving;
+    }
+  }
+  motionLast = pos;
+  pointerFrame();
+  motionRaf = requestAnimationFrame(motionFrame);
+}
+ipcRenderer.on('rec:motion', (_e, on) => {
+  motion = !!on;
+  motionLast = null;
+  pointerSent = '';
+  cursorImagesSent.clear();
+  if (motion && !motionRaf) motionRaf = requestAnimationFrame(motionFrame);
+});
+
+// The recorder also gets the mouse position over the page and the CSS cursor
+// under it, for the pointer it draws into the footage (tab capture has none).
+let pointer = null; // { x, y, inside } from the last mouse event
+let pointerSent = '';
+const cursorImages = new Map(); // CSS cursor url -> data URL, null if unfetchable, or a pending fetch
+const cursorIds = new Map(); // CSS cursor url -> short id used on the wire
+const cursorImagesSent = new Set(); // ids already handed to this recording
+
+window.addEventListener('mousemove', (e) => {
+  pointer = { x: e.clientX, y: e.clientY, inside: true };
+}, { capture: true, passive: true });
+window.addEventListener('mouseout', (e) => {
+  if (!e.relatedTarget && pointer) pointer = { ...pointer, inside: false };
+}, { capture: true, passive: true });
+window.addEventListener('mouseover', () => {
+  if (pointer) pointer = { ...pointer, inside: true };
+}, { capture: true, passive: true });
+
+function cursorImage(url) {
+  if (cursorImages.has(url)) return cursorImages.get(url);
+  if (url.startsWith('data:')) {
+    cursorImages.set(url, url);
+    return url;
+  }
+  const pending = fetch(url)
+    .then((r) => r.blob())
+    .then((blob) => new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(blob);
+    }))
+    .catch(() => null)
+    .then((data) => {
+      cursorImages.set(url, data);
+      return data;
+    });
+  cursorImages.set(url, pending);
+  return pending;
+}
+
+// Reduce a computed `cursor` value to what the recorder can draw. Image
+// cursors are fetched in the background; the keyword fallback shows meanwhile.
+function cursorShape(value) {
+  const m = /url\((["']?)(.*?)\1\)\s*(-?[\d.]+)?\s*(-?[\d.]+)?/.exec(value);
+  if (m) {
+    const url = m[2];
+    const data = cursorImage(url);
+    if (typeof data === 'string') {
+      if (!cursorIds.has(url)) cursorIds.set(url, cursorIds.size + 1);
+      const id = cursorIds.get(url);
+      if (!cursorImagesSent.has(id)) {
+        cursorImagesSent.add(id);
+        ipcRenderer.send('rec:cursor-image', { id, data });
+      }
+      return { type: 'url', id, hx: +m[3] || 0, hy: +m[4] || 0 };
+    }
+  }
+  const keyword = value.replace(/url\([^)]*\)[^,]*,?/g, '').trim().split(/\s*,\s*/).pop();
+  if (keyword === 'none') return { type: 'none' };
+  if (keyword === 'pointer' || keyword === 'grab' || keyword === 'grabbing') return { type: 'hand' };
+  if (keyword === 'text' || keyword === 'vertical-text') return { type: 'text' };
+  return { type: 'arrow' };
+}
+
+function pointerFrame() {
+  if (!pointer) return;
+  let shape = { type: 'arrow' };
+  if (pointer.inside) {
+    const el = document.elementFromPoint(pointer.x, pointer.y);
+    if (el) shape = cursorShape(getComputedStyle(el).cursor || 'auto');
+  }
+  const msg = { x: pointer.x / innerWidth, y: pointer.y / innerHeight, inside: pointer.inside, shape };
+  const key = JSON.stringify(msg);
+  if (key === pointerSent) return;
+  pointerSent = key;
+  ipcRenderer.send('rec:pointer', msg);
+}

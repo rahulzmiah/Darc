@@ -26,12 +26,15 @@
   header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
   header .meta { color: #666; font-variant-numeric: tabular-nums; flex: 1; }
   header button { -webkit-app-region: no-drag; }
-  .btn { padding: 5px 10px; border: 1px solid #333; color: #bbb; }
+  .btn { padding: 5px 10px; border: 1px solid #333; color: #bbb; white-space: nowrap; }
   .btn:hover { color: #fff; border-color: #555; }
   .btn:disabled { opacity: 0.35; pointer-events: none; }
   .btn.confirm { color: #ff4d2e; border-color: #ff4d2e; }
   .btn.primary { background: #fff; color: #000; border-color: #fff; min-width: 64px; }
   .btn.primary:hover { background: #ddd; }
+  .btn.record { color: #ff4d2e; border-color: #ff4d2e; }
+  .btn.record:hover { background: rgba(255, 77, 46, 0.12); color: #ff6a50; }
+  .btn.record.on { background: #ff4d2e; color: #fff; }
   #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
   #close:hover { color: #fff; }
   html { border: 1px solid #2a2a2a; }
@@ -67,13 +70,52 @@
   #preview:hover .ghost.on { display: block; }
 
   aside { flex: 1; min-width: 320px; display: flex; flex-direction: column; border-left: 1px solid #1f1f1f; }
-  #stops { flex: 1; overflow-y: auto; }
-  #stops::-webkit-scrollbar { width: 0; }
-  label.advanced { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid #1f1f1f; color: #888; cursor: pointer; }
-  label.advanced:hover { color: #bbb; }
-  label.advanced input { margin: 0; accent-color: #fff; }
-  body:not(.advanced) .easing { display: none; }
-  #easing { padding: 6px 16px 14px; border-top: 1px solid #1f1f1f; }
+
+  /* Timeline: playback time across, with each line's move and hold, and the
+     spans the recorded pointer is shown for. */
+  #timeline {
+    flex: none; position: relative; padding: 10px 16px 10px; border-bottom: 1px solid #1f1f1f;
+    display: grid; grid-template-columns: 48px 1fr; row-gap: 4px; align-items: center;
+  }
+  #timeline .lbl { color: #666; font-size: 11px; }
+  #tl-ruler { position: relative; height: 14px; }
+  #tl-ruler span { position: absolute; top: 0; transform: translateX(-50%); color: #555; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #tl-ruler span::after { content: ""; position: absolute; left: 50%; bottom: -4px; width: 1px; height: 4px; background: #333; }
+  .tl-track { position: relative; height: 20px; background: #111; overflow: hidden; }
+  .seg { position: absolute; top: 0; bottom: 0; cursor: pointer; }
+  .seg.move { background: rgba(77, 163, 255, 0.3); border-left: 1px solid #4da3ff; color: #cfe6ff; font-size: 10px; font-weight: 600; line-height: 20px; padding-left: 4px; overflow: hidden; }
+  .seg.hold { background: #1c1c1c; }
+  .seg.move.selected { background: rgba(255, 255, 255, 0.3); border-left-color: #fff; color: #fff; }
+  .seg.hold.selected { background: #2a2a2a; }
+  #tl-cursor { cursor: crosshair; }
+  .span { position: absolute; top: 2px; bottom: 2px; background: rgba(255, 77, 46, 0.35); border: 1px solid #ff4d2e; cursor: grab; }
+  .span.selected { background: rgba(255, 77, 46, 0.65); }
+  .span::before, .span::after { content: ""; position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
+  .span::before { left: -1px; }
+  .span::after { right: -1px; }
+  .span .x { position: absolute; right: 3px; top: -2px; color: #fff; font-size: 12px; line-height: 16px; display: none; cursor: pointer; }
+  .span:hover .x { display: block; }
+  body.span-dragging, body.span-dragging * { cursor: ew-resize !important; }
+  body.span-dragging.span-moving, body.span-dragging.span-moving * { cursor: grabbing !important; }
+  #tl-playhead { position: absolute; top: 10px; bottom: 10px; width: 2px; background: #ff4d2e; display: none; pointer-events: none; }
+  #tl-empty { grid-column: 1 / -1; color: #444; font-size: 11px; display: none; }
+  body.no-timeline #tl-empty { display: block; }
+  body.no-timeline #timeline > :not(#tl-empty) { display: none; }
+
+  /* Collapsible sections. */
+  #sections { flex: 1; overflow-y: auto; }
+  #sections::-webkit-scrollbar { width: 0; }
+  section > h2 {
+    display: flex; align-items: center; gap: 8px; padding: 9px 16px;
+    font-size: 12px; font-weight: 600; color: #bbb; border-bottom: 1px solid #1a1a1a; cursor: pointer;
+  }
+  section > h2:hover { color: #fff; }
+  section > h2 .chev { width: 0; height: 0; border: 4px solid transparent; border-left-color: #666; margin-right: 2px; transition: transform 0.12s; }
+  section.open > h2 .chev { transform: rotate(90deg); }
+  section > h2 .sub { color: #555; font-weight: 400; flex: 1; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  section > .body { display: none; }
+  section.open > .body { display: block; }
+  #easing, #cursor { padding: 4px 16px 14px; border-bottom: 1px solid #1a1a1a; }
   .hint { padding: 10px 16px; color: #555; font-size: 11px; border-top: 1px solid #1f1f1f; }
 
   .stop { padding: 14px 16px; border-bottom: 1px solid #1a1a1a; border-left: 2px solid transparent; }
@@ -93,6 +135,7 @@
   .stop-head .remove:hover { color: #fff; }
 
   .field { display: grid; grid-template-columns: 64px 1fr 72px; gap: 10px; align-items: center; margin-top: 8px; }
+  #cursor .field { grid-template-columns: 72px 1fr 72px; }
   .field label { color: #888; }
   .num {
     width: 100%; padding: 3px 6px; background: #0b0b0b; border: 1px solid #2a2a2a; outline: 0;
@@ -108,6 +151,14 @@
   .bez .num { padding: 3px 2px; text-align: center; }
   .bez .num::-webkit-inner-spin-button { display: none; }
 
+  .file { grid-column: 2 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .file span { color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body:not(.custom-cursor) .custom-only { display: none; }
+  .demo { position: relative; margin-top: 12px; }
+  .demo canvas { display: block; width: 100%; height: 90px; background: #050505; border: 1px solid #1f1f1f; cursor: none; }
+  .demo span { position: absolute; left: 8px; bottom: 6px; color: #444; font-size: 10px; pointer-events: none; }
+  .note { margin-top: 10px; color: #555; font-size: 11px; }
+
   input[type=range] { -webkit-appearance: none; width: 100%; height: 16px; background: transparent; }
   input[type=range]::-webkit-slider-runnable-track { height: 2px; background: #333; }
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; background: #fff; border: 0; }
@@ -120,6 +171,7 @@
   <span class="meta" id="meta"></span>
   <button class="btn" id="clear" title="Remove every line">Clear</button>
   <button class="btn" id="refresh" title="Recapture the page">Refresh</button>
+  <button class="btn record" id="record" title="Record the page (⌘E)">● Rec</button>
   <button class="btn primary" id="play">▶ Play</button>
   <button id="close" title="Close (⌘.)">×</button>
 </header>
@@ -133,21 +185,68 @@
     <div id="empty">Capturing page…</div>
   </div>
   <aside>
-    <div id="stops"></div>
-    <div class="easing" id="easing">
-      <div class="field"><label>Easing</label>
-        <select id="easing-preset"></select></div>
-      <div class="curve"><svg></svg>
-        <div class="bez">
-          <input class="num" data-bez="0" type="number" step="0.01" min="0" max="1">
-          <input class="num" data-bez="1" type="number" step="0.01">
-          <input class="num" data-bez="2" type="number" step="0.01" min="0" max="1">
-          <input class="num" data-bez="3" type="number" step="0.01">
-        </div>
-      </div>
+    <div id="timeline">
+      <span class="lbl"></span>
+      <div id="tl-ruler"></div>
+      <span class="lbl">Lines</span>
+      <div class="tl-track" id="tl-stops"></div>
+      <span class="lbl" title="When the recorded pointer is shown during playback">Cursor</span>
+      <div class="tl-track" id="tl-cursor" title="Drag to add a span the cursor shows for"></div>
+      <div id="tl-playhead"></div>
+      <div id="tl-empty">Add lines to build the timeline</div>
     </div>
-    <label class="advanced"><input type="checkbox" id="advanced"> Advanced options</label>
-    <div class="hint">Click the preview or scroll the page and press ⌘K to add a line · drag lines to move · drag ⋮⋮ to reorder · ⌫ delete · space play (here or in the page) · esc stop</div>
+    <div id="sections">
+      <section data-section="lines">
+        <h2><span class="chev"></span>Lines <span class="sub" id="lines-sub"></span></h2>
+        <div class="body" id="stops"></div>
+      </section>
+      <section data-section="easing">
+        <h2><span class="chev"></span>Easing <span class="sub" id="easing-sub"></span></h2>
+        <div class="body" id="easing">
+          <div class="field"><label>Curve</label>
+            <select id="easing-preset"></select></div>
+          <div class="curve"><svg></svg>
+            <div class="bez">
+              <input class="num" data-bez="0" type="number" step="0.01" min="0" max="1">
+              <input class="num" data-bez="1" type="number" step="0.01">
+              <input class="num" data-bez="2" type="number" step="0.01" min="0" max="1">
+              <input class="num" data-bez="3" type="number" step="0.01">
+            </div>
+          </div>
+        </div>
+      </section>
+      <section data-section="cursor">
+        <h2><span class="chev"></span>Cursor <span class="sub" id="cursor-sub"></span></h2>
+        <div class="body" id="cursor">
+          <div class="field"><label>Cursor</label>
+            <select id="cur-mode" title="The pointer drawn into recordings">
+              <option value="off">Off</option>
+              <option value="auto">Page's cursor</option>
+              <option value="arrow">Arrow</option>
+              <option value="custom">Custom image</option>
+            </select></div>
+          <div class="field custom-only"><label>Image</label>
+            <div class="file"><button class="btn" id="cur-pick">Choose…</button><span id="cur-name"></span></div></div>
+          <div class="field custom-only"><label>Hotspot</label>
+            <select id="cur-hotspot" title="The point of the image that sits on the mouse position">
+              <option value="tip">Top left</option>
+              <option value="center">Center</option>
+            </select></div>
+          <div class="field"><label>Size</label>
+            <input type="range" data-cur="size" min="12" max="64" step="1">
+            <input class="num" data-cur="size" type="number" min="8" max="128" step="1" title="px"></div>
+          <div class="field"><label>Smoothing</label>
+            <input type="range" data-cur="smoothing" min="0" max="600" step="10">
+            <input class="num" data-cur="smoothing" type="number" min="0" step="10" title="ms to settle · 0 follows the mouse exactly"></div>
+          <div class="field"><label>Damping</label>
+            <input type="range" data-cur="damping" min="0.3" max="1.5" step="0.05">
+            <input class="num" data-cur="damping" type="number" min="0.1" max="3" step="0.05" title="1 settles without overshoot · lower bounces · higher trails"></div>
+          <div class="demo"><canvas id="cur-demo"></canvas><span>Move over the box to try the smoothing</span></div>
+          <p class="note">Drawn into recordings only. Page's cursor follows the CSS cursor under the mouse, including image cursors. Drag on the Cursor track above to choose when it shows during the animation; with no spans it shows whenever the mouse is over the page.</p>
+        </div>
+      </section>
+    </div>
+    <div class="hint">Click the preview or scroll the page and press ⌘K to add a line · drag lines to move · drag ⋮⋮ to reorder · drag on the Cursor track for a span · ⌫ delete · ⌘Z undo · space play · esc stop</div>
   </aside>
 </main>
 
@@ -173,19 +272,27 @@
   const ghost = $('ghost');
   const list = $('stops');
 
-  // Easing controls are hidden unless advanced options are on.
-  const advanced = $('advanced');
-  advanced.checked = localStorage.getItem('narc.animator.advanced') === '1';
-  document.body.classList.toggle('advanced', advanced.checked);
-  advanced.addEventListener('change', () => {
-    document.body.classList.toggle('advanced', advanced.checked);
-    localStorage.setItem('narc.animator.advanced', advanced.checked ? '1' : '0');
-    advanced.blur(); // keep keyboard shortcuts working
-  });
+  // Sections remember whether they're open. Easing starts open for anyone who
+  // had the old "advanced options" switch on.
+  const SECTIONS_KEY = 'narc.animator.sections';
+  let openSections = { lines: true, easing: localStorage.getItem('narc.animator.advanced') === '1', cursor: false };
+  try {
+    openSections = { ...openSections, ...JSON.parse(localStorage.getItem(SECTIONS_KEY) || '{}') };
+  } catch {}
+  for (const sec of document.querySelectorAll('section[data-section]')) {
+    sec.classList.toggle('open', !!openSections[sec.dataset.section]);
+    sec.querySelector('h2').addEventListener('click', () => {
+      openSections[sec.dataset.section] = sec.classList.toggle('open');
+      localStorage.setItem(SECTIONS_KEY, JSON.stringify(openSections));
+      if (sec.dataset.section === 'cursor') renderDemo();
+    });
+  }
 
   let key = null;
   let stops = [];
+  let spans = []; // when the recorded pointer shows during playback: [{ start, end }] ms
   let selected = 0;
+  let selSpan = -1;
   let pageInfo = null; // { width, height, viewport }
   let progress = { playing: false };
 
@@ -201,6 +308,63 @@
     return { y, duration: 1600, easing: [...easing], hold: 600 };
   }
 
+  // Undo history: a snapshot of the track is taken before each change. Rapid
+  // repeats of the same edit (dragging a slider, typing a value, nudging with
+  // the arrow keys) collapse into one step.
+  const history = { undo: [], redo: [] };
+  let lastEdit = { tag: null, time: 0 };
+  const snapshot = () => ({
+    stops: stops.map((s) => ({ ...s, easing: [...s.easing] })),
+    spans: spans.map((s) => ({ ...s })),
+    selected,
+    easing: [...easing],
+  });
+
+  function pushSnapshot(snap) {
+    history.undo.push(snap);
+    if (history.undo.length > 200) history.undo.shift();
+    history.redo.length = 0;
+  }
+
+  function record(tag) {
+    const now = performance.now();
+    if (tag && lastEdit.tag === tag && now - lastEdit.time < 1000) {
+      lastEdit.time = now;
+      return;
+    }
+    lastEdit = { tag, time: now };
+    pushSnapshot(snapshot());
+  }
+
+  function restore(snap) {
+    if (progress.playing) narc.stop();
+    stops = snap.stops.map((s) => ({ ...s, easing: [...s.easing] }));
+    spans = (snap.spans || []).map((s) => ({ ...s }));
+    selected = Math.max(0, Math.min(snap.selected, stops.length - 1));
+    selSpan = -1;
+    easing = [...snap.easing];
+    lastEdit = { tag: null, time: 0 };
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    renderEasing();
+    commit();
+    render();
+    if (stops[selected]) scrollPreviewTo(stops[selected].y);
+  }
+
+  function undo() {
+    const snap = history.undo.pop();
+    if (!snap) return;
+    history.redo.push(snapshot());
+    restore(snap);
+  }
+
+  function redo() {
+    const snap = history.redo.pop();
+    if (!snap) return;
+    history.undo.push(snapshot());
+    restore(snap);
+  }
+
   const easingPanel = $('easing');
   const easingPreset = $('easing-preset');
   easingPreset.innerHTML = EASINGS.map(([name], j) => `<option value="${j}">${name}</option>`).join('')
@@ -210,6 +374,7 @@
     easingPanel.querySelector('svg').outerHTML = curveSvg(easing);
     const preset = EASINGS.findIndex(([, e]) => sameCurve(e, easing));
     easingPreset.value = preset < 0 ? 'custom' : preset;
+    $('easing-sub').textContent = preset < 0 ? 'Custom' : EASINGS[preset][0];
     easingPanel.querySelectorAll('[data-bez]').forEach((inp, j) => {
       if (inp !== document.activeElement) inp.value = easing[j];
     });
@@ -224,11 +389,14 @@
   easingPanel.addEventListener('input', (e) => {
     if (e.target === easingPreset) {
       if (easingPreset.value === 'custom') return;
+      record('easing-preset');
       easing = [...EASINGS[+easingPreset.value][1]];
+      easingPreset.blur(); // keep keyboard shortcuts working
     } else if (e.target.dataset.bez !== undefined) {
       const v = parseFloat(e.target.value);
       if (Number.isNaN(v)) return;
       const j = +e.target.dataset.bez;
+      record(`easing:${j}`);
       easing[j] = j % 2 ? v : Math.max(0, Math.min(1, v));
     }
     applyEasing();
@@ -236,8 +404,9 @@
 
   let saveTimer;
   function commit() {
+    normalizeSpans();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => narc.save(key, stops), 150);
+    saveTimer = setTimeout(() => narc.save(key, stops, spans), 150);
     renderMeta();
   }
 
@@ -245,15 +414,18 @@
     return stops.reduce((t, s) => t + s.duration + s.hold, 0);
   }
 
+  const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
+
   function renderMeta() {
-    const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
     if (!key) return ($('meta').textContent = 'Open a page in the main window first');
     const count = `${stops.length} line${stops.length === 1 ? '' : 's'}`;
     $('meta').textContent = progress.playing
       ? `${secs(progress.elapsed)} / ${secs(progress.total)}`
       : `${count} · ${secs(totalMs())}`;
+    $('lines-sub').textContent = stops.length ? `${count} · ${secs(totalMs())}` : 'None yet';
     $('play').textContent = progress.playing ? '■ Stop' : '▶ Play';
-    $('clear').disabled = !stops.length;
+    $('clear').disabled = !stops.length && !spans.length;
+    renderCursorSub();
   }
 
   function renderMarks() {
@@ -322,12 +494,15 @@
     renderMeta();
     renderMarks();
     renderList();
+    renderTimeline();
   }
 
   function select(i, scrollIntoView) {
     selected = i;
+    selSpan = -1;
     for (const el of list.querySelectorAll('.stop')) el.classList.toggle('selected', +el.dataset.index === i);
     renderMarks();
+    renderTimeline();
     if (scrollIntoView) {
       const card = list.querySelector(`.stop[data-index="${i}"]`);
       if (card) card.scrollIntoView({ block: 'nearest' });
@@ -345,10 +520,12 @@
     if (f) {
       const v = parseFloat(e.target.value);
       if (Number.isNaN(v)) return;
+      record(`${f}:${i}`);
       s[f] = f === 'y' ? clampY(v) : Math.round(Math.max(0, v) * 1000);
       const shown = SECONDS.has(f) ? s[f] / 1000 : s[f];
       for (const other of card.querySelectorAll(`[data-field="${f}"]`)) if (other !== e.target) other.value = shown;
       if (f === 'y') renderMarks();
+      else renderTimeline();
     }
     commit();
   });
@@ -366,7 +543,7 @@
     if (grip && e.button === 0) {
       e.preventDefault();
       const card = grip.closest('.stop');
-      reorder = { from: +card.dataset.index, to: +card.dataset.index };
+      reorder = { from: +card.dataset.index, to: +card.dataset.index, before: snapshot() };
       card.classList.add('dragging');
       document.body.classList.add('reordering');
       return;
@@ -391,6 +568,7 @@
   }
 
   function removeStop(i) {
+    record();
     stops.splice(i, 1);
     selected = Math.max(0, Math.min(selected >= i ? selected - 1 : selected, stops.length - 1));
     commit();
@@ -418,9 +596,11 @@
     if (!pageInfo || !key || e.button !== 0) return;
     const line = e.target.closest('.line');
     let i;
+    const before = snapshot();
     if (line) {
       i = +line.dataset.index;
     } else {
+      pushSnapshot(before);
       stops.push(newStop(yFromEvent(e)));
       i = stops.length - 1;
       commit();
@@ -429,7 +609,8 @@
     select(i, true);
     const startY = e.clientY;
     const origin = stops[i].y;
-    drag = { i, startY, origin };
+    // Moving an existing line becomes one undo step once it's released.
+    drag = { i, startY, origin, before: line ? before : null };
     ghost.classList.remove('on');
     seek();
     e.preventDefault();
@@ -457,11 +638,12 @@
 
   window.addEventListener('mouseup', () => {
     if (!reorder) return;
-    const { from, to } = reorder;
+    const { from, to, before } = reorder;
     reorder = null;
     document.body.classList.remove('reordering');
     const target = to > from ? to - 1 : to;
     if (target !== from) {
+      pushSnapshot(before);
       const [moved] = stops.splice(from, 1);
       stops.splice(target, 0, moved);
       selected = target;
@@ -481,20 +663,358 @@
   window.addEventListener('mouseup', () => {
     if (!drag) return;
     const moved = stops[drag.i].y !== drag.origin;
+    if (moved && drag.before) pushSnapshot(drag.before);
     drag = null;
     commit();
     if (moved) seek();
   });
 
+  // ---- Timeline ------------------------------------------------------------
+  // Playback time along the x axis: each line's move (blue) and hold (grey),
+  // and below them the spans the recorded pointer is shown for. Drag on empty
+  // track to add a span, drag a span to move it, its edges to resize.
+  const tlRuler = $('tl-ruler');
+  const tlStops = $('tl-stops');
+  const tlCursor = $('tl-cursor');
+  const tlPlayhead = $('tl-playhead');
+  const TICKS = [250, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000];
+  const fmtT = (ms) => (ms >= 60000
+    ? `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
+    : `${+(ms / 1000).toFixed(2)}s`);
+
+  function segments() {
+    const segs = [];
+    let t = 0;
+    stops.forEach((s, i) => {
+      segs.push({ i, kind: 'move', start: t, end: t + s.duration });
+      t += s.duration;
+      segs.push({ i, kind: 'hold', start: t, end: t + s.hold });
+      t += s.hold;
+    });
+    return segs;
+  }
+
+  const tlX = (t) => (t / totalMs()) * tlCursor.clientWidth;
+
+  function renderTimeline() {
+    const total = totalMs();
+    document.body.classList.toggle('no-timeline', !total);
+    if (!total) {
+      tlRuler.innerHTML = tlStops.innerHTML = tlCursor.innerHTML = '';
+      return;
+    }
+    const tick = TICKS.find((s) => tlX(s) >= 44) || TICKS[TICKS.length - 1];
+    let ruler = '';
+    for (let t = 0; t <= total + 1e-6; t += tick) ruler += `<span style="left:${tlX(t)}px">${fmtT(t)}</span>`;
+    tlRuler.innerHTML = ruler;
+    tlStops.innerHTML = segments().map((sg) => {
+      const w = Math.max(1, tlX(sg.end) - tlX(sg.start));
+      const title = sg.kind === 'move' ? `Line ${sg.i + 1} · ${secs(stops[sg.i].duration)}` : `Hold · ${secs(stops[sg.i].hold)}`;
+      return `<div class="seg ${sg.kind}${sg.i === selected ? ' selected' : ''}" data-index="${sg.i}" style="left:${tlX(sg.start)}px;width:${w}px" title="${title}">${sg.kind === 'move' && w > 14 ? sg.i + 1 : ''}</div>`;
+    }).join('');
+    tlCursor.innerHTML = spans.map((sp, j) => {
+      const w = Math.max(3, tlX(sp.end) - tlX(sp.start));
+      return `<div class="span${j === selSpan ? ' selected' : ''}" data-span="${j}" style="left:${tlX(sp.start)}px;width:${w}px" title="Cursor shown ${fmtT(sp.start)} – ${fmtT(sp.end)}"><span class="x" data-remove-span="${j}" title="Remove">×</span></div>`;
+    }).join('');
+    renderPlayhead();
+  }
+
+  function renderPlayhead() {
+    if (!progress.playing || !totalMs()) return (tlPlayhead.style.display = 'none');
+    tlPlayhead.style.display = 'block';
+    tlPlayhead.style.left = `${tlCursor.offsetLeft + tlX(Math.min(progress.elapsed, totalMs()))}px`;
+  }
+
+  // Clamp spans to the animation, drop empty ones and merge any that overlap.
+  function normalizeSpans() {
+    const total = totalMs();
+    const sorted = spans
+      .map((s) => ({ start: Math.max(0, Math.min(total, Math.round(s.start))), end: Math.max(0, Math.min(total, Math.round(s.end))) }))
+      .filter((s) => s.end - s.start >= 1)
+      .sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const s of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+      else merged.push(s);
+    }
+    const sel = spans[selSpan];
+    spans = merged;
+    selSpan = sel ? spans.findIndex((s) => sel.start >= s.start && sel.start <= s.end) : -1;
+  }
+
+  function selectSpan(j) {
+    selSpan = j;
+    renderTimeline();
+  }
+
+  function removeSpan(j) {
+    record();
+    spans.splice(j, 1);
+    selSpan = -1;
+    commit();
+    renderTimeline();
+  }
+
+  const tlT = (clientX) => {
+    const r = tlCursor.getBoundingClientRect();
+    return Math.max(0, Math.min(totalMs(), ((clientX - r.left) / r.width) * totalMs()));
+  };
+
+  // Snap to the ends of the animation and its segments when within a few px.
+  function snapT(t) {
+    const pxPer = tlCursor.clientWidth / totalMs();
+    let best = t;
+    let dist = 6 / pxPer;
+    for (const sg of segments()) {
+      for (const p of [sg.start, sg.end]) {
+        if (Math.abs(p - t) < dist) {
+          dist = Math.abs(p - t);
+          best = p;
+        }
+      }
+    }
+    return best;
+  }
+
+  tlStops.addEventListener('mousedown', (e) => {
+    const seg = e.target.closest('.seg');
+    if (!seg || e.button !== 0) return;
+    e.preventDefault();
+    select(+seg.dataset.index, true);
+    scrollPreviewTo(stops[selected].y);
+    seek();
+  });
+
+  let spanDrag = null; // { mode: 'create' | 'move' | 'start' | 'end', j, anchor, origin, before, moved }
+  tlCursor.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !totalMs() || !key) return;
+    e.preventDefault();
+    const remove = e.target.closest('[data-remove-span]');
+    if (remove) return removeSpan(+remove.dataset.removeSpan);
+    const before = snapshot();
+    const el = e.target.closest('.span');
+    if (el) {
+      const j = +el.dataset.span;
+      const r = el.getBoundingClientRect();
+      const mode = e.clientX - r.left <= 7 ? 'start' : r.right - e.clientX <= 7 ? 'end' : 'move';
+      selectSpan(j);
+      spanDrag = { mode, j, anchor: tlT(e.clientX), origin: { ...spans[j] }, before, moved: false };
+      document.body.classList.toggle('span-moving', mode === 'move');
+    } else {
+      const t = snapT(tlT(e.clientX));
+      spans.push({ start: t, end: t });
+      selectSpan(spans.length - 1);
+      spanDrag = { mode: 'create', j: spans.length - 1, anchor: t, before, moved: false };
+      document.body.classList.remove('span-moving');
+    }
+    document.body.classList.add('span-dragging');
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!spanDrag) return;
+    const d = spanDrag;
+    const sp = spans[d.j];
+    const total = totalMs();
+    const t = tlT(e.clientX);
+    if (d.mode === 'create') {
+      const s = snapT(t);
+      sp.start = Math.min(d.anchor, s);
+      sp.end = Math.max(d.anchor, s);
+    } else if (d.mode === 'start') {
+      sp.start = Math.min(snapT(t), sp.end);
+    } else if (d.mode === 'end') {
+      sp.end = Math.max(snapT(t), sp.start);
+    } else {
+      const len = d.origin.end - d.origin.start;
+      const raw = Math.max(0, Math.min(total - len, d.origin.start + (t - d.anchor)));
+      // Snap whichever edge is nearer to a boundary.
+      const byStart = snapT(raw);
+      const byEnd = snapT(raw + len) - len;
+      let start = raw;
+      if (byStart !== raw && (byEnd === raw || Math.abs(byStart - raw) <= Math.abs(byEnd - raw))) start = byStart;
+      else if (byEnd !== raw) start = byEnd;
+      start = Math.max(0, Math.min(total - len, start));
+      sp.start = start;
+      sp.end = start + len;
+    }
+    d.moved = true;
+    renderTimeline();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!spanDrag) return;
+    const d = spanDrag;
+    spanDrag = null;
+    document.body.classList.remove('span-dragging', 'span-moving');
+    const sp = spans[d.j];
+    // A click (or a tiny drag) on empty track adds nothing.
+    if (d.mode === 'create' && (!sp || tlX(sp.end) - tlX(sp.start) < 4)) {
+      spans.splice(d.j, 1);
+      selSpan = -1;
+      renderTimeline();
+      return;
+    }
+    if (d.moved) {
+      pushSnapshot(d.before);
+      commit();
+    }
+    renderTimeline();
+  });
+
+  // ---- Cursor settings -----------------------------------------------------
+  // Global (not per page): what the recorder draws and how it moves. The demo
+  // box runs the same spring as the recorder does.
+  const MODES = { off: 'Off', auto: "Page's cursor", arrow: 'Arrow', custom: 'Custom image' };
+  const ARROW = { w: 16, h: 22, hx: 1.5, hy: 1.5, src: `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="22" viewBox="0 0 16 22"><path d="M1.5 1.5v16.3l4.3-4 3 6.8 3-1.3-3-6.7h6.2z" fill="#000" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>')}` };
+  let cursor = null; // settings from the main process
+  const cursorPanel = $('cursor');
+  const arrowImg = new Image();
+  arrowImg.src = ARROW.src;
+  let customImg = null;
+
+  function renderCursorSub() {
+    if (!cursor) return;
+    const spanText = spans.length ? ` · ${spans.length} span${spans.length === 1 ? '' : 's'}` : '';
+    $('cursor-sub').textContent = cursor.mode === 'off' ? 'Off' : `${MODES[cursor.mode]}${spanText}`;
+  }
+
+  function renderCursor() {
+    if (!cursor) return;
+    $('cur-mode').value = cursor.mode;
+    document.body.classList.toggle('custom-cursor', cursor.mode === 'custom');
+    $('cur-name').textContent = cursor.custom ? cursor.custom.name : 'No image chosen';
+    $('cur-hotspot').value = cursor.hotspot || 'tip';
+    for (const inp of cursorPanel.querySelectorAll('[data-cur]')) {
+      if (inp !== document.activeElement) inp.value = cursor[inp.dataset.cur];
+    }
+    if (cursor.image && (!customImg || customImg.src !== cursor.image)) {
+      customImg = new Image();
+      customImg.src = cursor.image;
+      customImg.onload = renderDemo;
+    } else if (!cursor.image) customImg = null;
+    renderCursorSub();
+    renderDemo();
+  }
+
+  function saveCursor() {
+    const { mode, hotspot, size, smoothing, damping } = cursor;
+    narc.cursorSet({ mode, hotspot, size, smoothing, damping });
+  }
+
+  cursorPanel.addEventListener('input', (e) => {
+    if (!cursor) return;
+    if (e.target === $('cur-mode')) {
+      cursor.mode = e.target.value;
+      e.target.blur();
+    } else if (e.target === $('cur-hotspot')) {
+      cursor.hotspot = e.target.value;
+      e.target.blur();
+    } else if (e.target.dataset.cur) {
+      const v = parseFloat(e.target.value);
+      if (Number.isNaN(v)) return;
+      cursor[e.target.dataset.cur] = v;
+      for (const other of cursorPanel.querySelectorAll(`[data-cur="${e.target.dataset.cur}"]`)) if (other !== e.target) other.value = v;
+    } else return;
+    saveCursor();
+    renderCursor();
+  });
+
+  $('cur-pick').addEventListener('click', async () => {
+    const c = await narc.cursorPick();
+    if (c) {
+      cursor = c;
+      renderCursor();
+    }
+  });
+
+  // Demo: the chosen cursor chases the mouse across the box with the current
+  // smoothing and damping.
+  const demoCanvas = $('cur-demo');
+  const demo = { pos: null, vel: { x: 0, y: 0 }, target: null, raf: 0, last: 0 };
+  demoCanvas.addEventListener('mousemove', (e) => {
+    const r = demoCanvas.getBoundingClientRect();
+    demo.target = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (!demo.pos) demo.pos = { ...demo.target };
+    if (!demo.raf) {
+      demo.last = performance.now();
+      demo.raf = requestAnimationFrame(demoFrame);
+    }
+  });
+
+  function demoFrame(now) {
+    const dt = Math.max(1 / 240, Math.min((now - demo.last) / 1000, 1 / 20));
+    demo.last = now;
+    const { smoothing, damping } = cursor || { smoothing: 0, damping: 1 };
+    let settled = true;
+    if (!(smoothing > 0)) {
+      demo.pos = { ...demo.target };
+      demo.vel = { x: 0, y: 0 };
+    } else {
+      const omega = 6 / (smoothing / 1000);
+      const zeta = Math.max(0.05, +damping || 1);
+      const n = Math.max(1, Math.ceil((omega * dt) / 0.2));
+      const h = dt / n;
+      for (let i = 0; i < n; i++) {
+        for (const a of ['x', 'y']) {
+          const x = demo.pos[a] - demo.target[a];
+          demo.vel[a] += (-2 * zeta * omega * demo.vel[a] - omega * omega * x) * h;
+          demo.pos[a] += demo.vel[a] * h;
+        }
+      }
+      settled = Math.hypot(demo.pos.x - demo.target.x, demo.pos.y - demo.target.y) < 0.2 && Math.hypot(demo.vel.x, demo.vel.y) < 2;
+    }
+    renderDemo();
+    demo.raf = settled ? 0 : requestAnimationFrame(demoFrame);
+  }
+
+  function renderDemo() {
+    const dpr = devicePixelRatio;
+    const w = demoCanvas.clientWidth;
+    const h = demoCanvas.clientHeight;
+    if (!w || !h || !cursor) return;
+    if (demoCanvas.width !== Math.round(w * dpr) || demoCanvas.height !== Math.round(h * dpr)) {
+      demoCanvas.width = Math.round(w * dpr);
+      demoCanvas.height = Math.round(h * dpr);
+    }
+    const ctx = demoCanvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (cursor.mode === 'off') return;
+    const pos = demo.pos || { x: w / 2, y: h / 2 };
+    const size = cursor.size || 22;
+    if (cursor.mode === 'custom' && customImg && customImg.complete && customImg.naturalWidth) {
+      const ih = size;
+      const iw = (customImg.naturalWidth / customImg.naturalHeight) * ih;
+      const hx = cursor.hotspot === 'center' ? iw / 2 : 0;
+      const hy = cursor.hotspot === 'center' ? ih / 2 : 0;
+      ctx.drawImage(customImg, pos.x - hx, pos.y - hy, iw, ih);
+    } else if (arrowImg.complete && arrowImg.naturalWidth) {
+      const u = size / ARROW.h;
+      ctx.drawImage(arrowImg, pos.x - ARROW.hx * u, pos.y - ARROW.hy * u, ARROW.w * u, ARROW.h * u);
+    }
+  }
+  arrowImg.onload = renderDemo;
+
+  narc.cursorGet().then((c) => {
+    cursor = c;
+    renderCursor();
+  });
+
   function togglePlay() {
     if (progress.playing) return narc.stop();
     clearTimeout(saveTimer);
-    narc.save(key, stops);
+    narc.save(key, stops, spans);
     narc.play();
   }
 
   $('play').addEventListener('click', togglePlay);
   $('refresh').addEventListener('click', () => capture(true));
+  $('record').addEventListener('click', () => narc.record());
+  narc.onRecordState((on) => {
+    $('record').classList.toggle('on', on);
+    $('record').textContent = on ? '■ Rec' : '● Rec';
+  });
 
   // Clear takes a second click to confirm, since it wipes the whole track.
   let clearTimer;
@@ -512,17 +1032,22 @@
     }
     resetClear();
     if (progress.playing) narc.stop();
+    record();
     stops = [];
+    spans = [];
     selected = 0;
+    selSpan = -1;
     commit();
     render();
   });
 
   narc.onAddStop((data) => {
     if (data.key !== key) return;
+    record();
     if (data.reset) {
       if (progress.playing) narc.stop();
       stops = [];
+      spans = [];
     }
     stops.push(newStop(clampY(data.y)));
     commit();
@@ -533,18 +1058,28 @@
   $('close').addEventListener('click', () => narc.close());
 
   window.addEventListener('keydown', (e) => {
+    // ⌘Z / ⇧⌘Z undo and redo track edits, even from inside a field.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+      return;
+    }
     if (e.target.matches('input, select')) return;
     if (e.key === ' ') {
       e.preventDefault();
       togglePlay();
-    } else if ((e.key === 'Backspace' || e.key === 'Delete') && stops.length) {
-      removeStop(selected);
+    } else if (e.key === 'Backspace' || e.key === 'Delete') {
+      if (selSpan >= 0 && spans[selSpan]) removeSpan(selSpan);
+      else if (stops.length) removeStop(selected);
     } else if (e.key === 'Escape') {
+      if (selSpan >= 0) selectSpan(-1);
       narc.stop();
     } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && stops.length) {
       e.preventDefault();
       if (e.altKey || e.shiftKey) {
         const step = e.shiftKey ? 100 : 10;
+        record(`nudge:${selected}`);
         stops[selected].y = clampY(stops[selected].y + (e.key === 'ArrowUp' ? -step : step));
         commit();
         render();
@@ -562,6 +1097,7 @@
     progress = p.playing ? p : { playing: false };
     renderMeta();
     renderMarks();
+    renderPlayhead();
     if (p.playing) {
       scrollPreviewTo(p.y);
       if (!wasPlaying || lastIndex !== p.index) renderList();
@@ -570,7 +1106,11 @@
     }
   });
 
-  window.addEventListener('resize', renderMarks);
+  window.addEventListener('resize', () => {
+    renderMarks();
+    renderTimeline();
+    renderDemo();
+  });
 
   let captureId = 0;
   async function capture(force) {
@@ -594,8 +1134,13 @@
   async function load() {
     const data = await narc.load();
     key = data.key;
-    stops = data.stops;
+    stops = data.stops || [];
+    spans = data.cursor || [];
     selected = 0;
+    selSpan = -1;
+    history.undo.length = 0;
+    history.redo.length = 0;
+    lastEdit = { tag: null, time: 0 };
     // Older tracks could mix curves; bring every line in line with the first.
     easing = stops.length ? [...stops[0].easing] : [...DEFAULT_EASING];
     if (stops.some((s) => !sameCurve(s.easing, easing))) applyEasing();

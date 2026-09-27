@@ -1,4 +1,4 @@
-const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen, shell, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -14,6 +14,16 @@ const DEFAULTS = {
 
 const DEFAULT_EASING = [0.87, 0, 0.13, 1]; // ease in-out · expo
 
+// The pointer drawn into recordings (the tab capture has none of its own).
+const CURSOR_DEFAULTS = {
+  mode: 'auto', // 'off' | 'auto' (follow the page's CSS cursor) | 'arrow' | 'custom'
+  size: 22, // height in CSS px for the built-in shapes and custom images
+  smoothing: 120, // ms for the drawn pointer to settle on the real one, 0 = none
+  damping: 1, // spring damping ratio: below 1 overshoots, above 1 trails
+  hotspot: 'tip', // where a custom image points from: 'tip' (top left) | 'center'
+  custom: null, // { name, path } of an uploaded image
+};
+
 const BLANK_PAGE = 'data:text/html,<body style="background:%23000"></body>';
 
 const storePath = path.join(app.getPath('userData'), 'settings.json');
@@ -23,10 +33,10 @@ if (!fs.existsSync(storePath) && fs.existsSync(legacyStorePath)) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
   fs.copyFileSync(legacyStorePath, storePath);
 }
-let store = { settings: { ...DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorWidth: 680 };
+let store = { settings: { ...DEFAULTS }, cursor: { ...CURSOR_DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorWidth: 680, reloadOnRecord: true, recordHeight: 'native', motionBlur: 0 };
 try {
   const saved = JSON.parse(fs.readFileSync(storePath, 'utf8'));
-  store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings } };
+  store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings }, cursor: { ...CURSOR_DEFAULTS, ...saved.cursor } };
 } catch {}
 
 let saveTimer;
@@ -35,8 +45,19 @@ function save() {
   saveTimer = setTimeout(() => fs.writeFileSync(storePath, JSON.stringify(store, null, 2)), 300);
 }
 
-let win, page, overlay, toast, animator;
+let win, page, overlay, toast, animator, recorder;
 let toastTimer;
+
+// Recording window, docked under the main window like the animation panel
+// sits beside it. Being its own window, it never touches the viewport.
+const RECORDER_HEIGHT = 112;
+const recorderQueue = []; // callbacks waiting for the recorder page to load
+let recording = null; // { fd, path, name } while the pane writes a file
+let recordingActive = false; // the pane is capturing (starting, recording or saving)
+let lastRecording = null;
+let closingForRecording = false; // window close deferred until the recording is saved
+let pendingReload = false; // the pane asked for a reload; skip its navigation marker
+let animPlaying = false;
 let markerPrompt = null; // { key } while the toast is asking to restart a timeline
 let markerVisitKey = null; // page whose saved timeline the user has already been asked about this visit
 let overlayMode = null;
@@ -58,6 +79,125 @@ function layout() {
   const tw = 340;
   const th = 52;
   toast.setBounds({ x: Math.round((width - tw) / 2), y: height - th - 28, width: tw, height: th });
+}
+
+// Size of the page view in physical pixels — what a recording captures.
+function viewportPixels() {
+  const { width, height } = page.getBounds();
+  const scale = screen.getDisplayMatching(win.getBounds()).scaleFactor || 1;
+  return { width: Math.round(width * scale), height: Math.round(height * scale), css: { width, height } };
+}
+
+const recorderOpen = () => !!recorder && !recorder.isDestroyed();
+
+// Directly under the main window, matching its width; clamped to the display's
+// work area, so with no room below it overlaps the bottom of the page instead.
+function recorderDock() {
+  const main = win.getBounds();
+  const area = screen.getDisplayMatching(main).workArea;
+  const gap = 8;
+  const width = Math.min(main.width, area.width);
+  const x = Math.max(area.x, Math.min(main.x, area.x + area.width - width));
+  const y = Math.min(main.y + main.height + gap, area.y + area.height - RECORDER_HEIGHT);
+  return { x, y: Math.max(area.y, y), width, height: RECORDER_HEIGHT };
+}
+
+function dockRecorder() {
+  if (recorderOpen() && !win.isFullScreen()) recorder.setBounds(recorderDock());
+}
+
+function openRecorder() {
+  if (recorderOpen()) return;
+  recorder = new BrowserWindow({
+    ...recorderDock(),
+    resizable: false,
+    minimizable: false,
+    title: 'Record',
+    frame: false,
+    roundedCorners: false,
+    hasShadow: true,
+    backgroundColor: '#0b0b0b',
+    webPreferences: {
+      preload: path.join(__dirname, 'recorder-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false, // the encoder's frame clock must not slow down
+    },
+  });
+  recorder.loadFile(path.join(__dirname, 'recorder.html'));
+  recorder.webContents.once('did-finish-load', () => {
+    for (const fn of recorderQueue.splice(0)) fn();
+  });
+  recorder.on('close', (e) => {
+    if (recordingActive) {
+      e.preventDefault();
+      showToast('Stop the recording first · ⌘E');
+    }
+  });
+  recorder.on('closed', () => {
+    recorder = null;
+    recorderQueue.length = 0;
+  });
+}
+
+function closeRecorder() {
+  if (recorderOpen()) recorder.close();
+}
+
+function toggleRecorder() {
+  if (recorderOpen()) closeRecorder();
+  else openRecorder();
+}
+
+function sendToRecorder(channel, data) {
+  if (recorderOpen()) recorder.webContents.send(channel, data);
+}
+
+function whenRecorderReady(fn) {
+  if (!recorderOpen()) return;
+  if (recorder.webContents.isLoading()) recorderQueue.push(fn);
+  else fn();
+}
+
+// ⌘E: open the pane and start recording, or stop the one in progress.
+function toggleRecording() {
+  if (!recordingActive && !/^https?:/.test(page.webContents.getURL())) return showToast('Open a page first · ⌘L');
+  openRecorder();
+  whenRecorderReady(() => sendToRecorder('rec:toggle'));
+}
+
+function setRecordingActive(on) {
+  if (!win || win.isDestroyed()) return;
+  recordingActive = on;
+  sendToAnimator('rec:state', on);
+  // The page streams its scroll velocity to the recorder while capturing.
+  page.webContents.send('rec:motion', on);
+  // Hand focus back to the page once capture starts, so space and the
+  // scrolling keys work straight away.
+  if (on) {
+    win.focus();
+    page.webContents.focus();
+  }
+}
+
+function recordingsDir() {
+  return path.join(app.getPath('videos'), 'Darc');
+}
+
+function recordingName() {
+  let host = 'page';
+  try {
+    host = new URL(page.webContents.getURL()).hostname.replace(/^www\./, '') || host;
+  } catch {}
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`;
+  return `${host} ${stamp}.mp4`;
+}
+
+function revealLastRecording() {
+  if (lastRecording && fs.existsSync(lastRecording)) shell.showItemInFolder(lastRecording);
+  else showToast('No recordings yet · ⌘E');
 }
 
 function showToast(text) {
@@ -143,8 +283,66 @@ function animationKey() {
   }
 }
 
+// A page's track: its scroll stops, plus the spans of playback time (ms) the
+// recorded pointer is shown for. Older saves were just the stops.
+function trackFor(key) {
+  const t = key && store.animations[key];
+  if (!t) return { stops: [], cursor: [] };
+  if (Array.isArray(t)) return { stops: t, cursor: [] };
+  return { stops: t.stops || [], cursor: t.cursor || [] };
+}
+
+function saveTrack(key, track) {
+  if (track.stops.length || track.cursor.length) store.animations[key] = track;
+  else delete store.animations[key];
+  save();
+  syncCursorSpans();
+}
+
 function sendToAnimator(channel, data) {
   if (animator && !animator.isDestroyed()) animator.webContents.send(channel, data);
+}
+
+// ---- Cursor overlay settings -------------------------------------------------
+const IMAGE_MIME = { '.png': 'image/png', '.svg': 'image/svg+xml', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+
+// Settings as the recorder and the panel's demo need them: with the custom
+// image inlined, since neither can read files.
+function cursorPayload() {
+  const c = store.cursor;
+  let image = null;
+  if (c.custom && c.custom.path) {
+    try {
+      const mime = IMAGE_MIME[path.extname(c.custom.path).toLowerCase()] || 'image/png';
+      image = `data:${mime};base64,${fs.readFileSync(c.custom.path).toString('base64')}`;
+    } catch {}
+  }
+  return { ...c, image };
+}
+
+function syncCursor() {
+  sendToRecorder('rec:cursor', cursorPayload());
+}
+
+function syncCursorSpans() {
+  sendToRecorder('rec:cursor-spans', trackFor(animationKey()).cursor);
+}
+
+// Copies the chosen image into the app's data folder so it outlives the original.
+async function pickCursorImage() {
+  const { canceled, filePaths } = await dialog.showOpenDialog(animator && !animator.isDestroyed() ? animator : win, {
+    title: 'Choose a cursor image',
+    filters: [{ name: 'Images', extensions: ['png', 'svg', 'gif', 'jpg', 'jpeg', 'webp'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || !filePaths.length) return null;
+  const src = filePaths[0];
+  const dest = path.join(app.getPath('userData'), `cursor${path.extname(src).toLowerCase()}`);
+  fs.copyFileSync(src, dest);
+  store.cursor = { ...store.cursor, mode: 'custom', custom: { name: path.basename(src), path: dest } };
+  save();
+  syncCursor();
+  return cursorPayload();
 }
 
 // Open the panel docked against the right edge of the main window, matching its
@@ -182,6 +380,8 @@ function toggleAnimator() {
     },
   });
   animator.loadFile(path.join(__dirname, 'animator.html'));
+  // The recording window comes along, so output settings can be chosen before pressing record.
+  openRecorder();
   animator.on('resized', () => {
     store.animatorWidth = animator.getBounds().width;
     save();
@@ -395,7 +595,7 @@ function pageScrollY() {
 async function setMarker() {
   const key = animationKey();
   if (!key) return showToast('Open a page first · ⌘L');
-  const saved = store.animations[key] || [];
+  const saved = trackFor(key).stops;
   if (markerPrompt) {
     // ⌘K again while asking means "keep it" — carry on adding markers.
     dismissToast();
@@ -416,20 +616,19 @@ async function addMarker(key, reset) {
     // pending edits aren't clobbered.
     sendToAnimator('anim:add-stop', { key, y, reset });
   } else {
-    const stops = reset ? [] : store.animations[key] || [];
+    const track = trackFor(key);
     // Easing is shared across the track, so follow the existing lines.
-    const prev = store.animations[key] || [];
-    const easing = prev.length ? [...prev[0].easing] : [...DEFAULT_EASING];
+    const easing = track.stops.length ? [...track.stops[0].easing] : [...DEFAULT_EASING];
+    const stops = reset ? [] : track.stops;
     stops.push({ y, duration: 1600, easing, hold: 600 });
-    store.animations[key] = stops;
-    save();
+    saveTrack(key, { stops, cursor: reset ? [] : track.cursor });
   }
   showToast(reset ? `Timeline restarted · ${y}px` : `Marker set · ${y}px`);
 }
 
 function playAnimation() {
-  const stops = store.animations[animationKey()];
-  if (!stops || !stops.length) return showToast('No animation for this page · ⌘.');
+  const { stops } = trackFor(animationKey());
+  if (!stops.length) return showToast('No animation for this page · ⌘.');
   hideOverlay();
   win.focus();
   page.webContents.focus();
@@ -486,6 +685,22 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Play', accelerator: 'CmdOrCtrl+Enter', click: playAnimation },
         { label: 'Stop', accelerator: 'Shift+CmdOrCtrl+.', click: () => page.webContents.send('anim:stop') },
+      ],
+    },
+    {
+      label: 'Record',
+      submenu: [
+        { label: 'Record / Stop', accelerator: 'CmdOrCtrl+E', click: toggleRecording },
+        { label: 'Recording Window', accelerator: 'Alt+CmdOrCtrl+E', click: toggleRecorder },
+        { type: 'separator' },
+        { label: 'Reveal Last Recording', click: revealLastRecording },
+        {
+          label: 'Open Recordings Folder',
+          click: () => {
+            fs.mkdirSync(recordingsDir(), { recursive: true });
+            shell.openPath(recordingsDir());
+          },
+        },
       ],
     },
     {
@@ -560,10 +775,34 @@ function createWindow() {
   layout();
   win.on('resize', layout);
   win.on('resize', schedulePreview);
-  win.on('close', () => {
+  // The recording window follows the main window around.
+  win.on('move', dockRecorder);
+  win.on('resize', dockRecorder);
+  let viewportTimer;
+  win.on('resize', () => {
+    clearTimeout(viewportTimer);
+    viewportTimer = setTimeout(() => sendToRecorder('rec:viewport', viewportPixels()), 150);
+  });
+  win.on('leave-full-screen', dockRecorder);
+  win.on('close', (e) => {
+    if (recordingActive) {
+      // Finish writing the file first; the pane reports back and we close then.
+      e.preventDefault();
+      if (!closingForRecording) {
+        closingForRecording = true;
+        showToast('Saving recording…');
+        sendToRecorder('rec:stop');
+      }
+      return;
+    }
     store.bounds = win.getBounds();
     clearTimeout(saveTimer);
     fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
+  });
+  // The panes belong to the main window; without it they'd be left orphaned.
+  win.on('closed', () => {
+    if (recorderOpen()) recorder.destroy();
+    if (animator && !animator.isDestroyed()) animator.destroy();
   });
 
   const wc = page.webContents;
@@ -572,6 +811,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   wc.on('dom-ready', () => {
+    if (recordingActive) wc.send('rec:motion', true); // a reload mid-recording restarts the preload
     scrollbarCssKey = null;
     applyScrollbarCss();
     // No keyboard focus rings on recorded pages.
@@ -590,6 +830,23 @@ function createWindow() {
     if (markerPrompt) dismissToast();
   });
   wc.on('did-navigate-in-page', remember);
+  // Timeline markers for the recording pane. Recording carries on across
+  // navigations; these just note where they happened.
+  wc.on('did-navigate', syncCursorSpans);
+  wc.on('did-navigate-in-page', syncCursorSpans);
+  wc.on('did-navigate', (_e, url) => {
+    if (pendingReload) {
+      pendingReload = false;
+      return;
+    }
+    let label = url;
+    try {
+      const u = new URL(url);
+      label = u.hostname.replace(/^www\./, '') + (u.pathname !== '/' ? u.pathname : '');
+    } catch {}
+    sendToRecorder('rec:event', { type: 'nav', label: label.length > 40 ? `${label.slice(0, 39)}…` : label });
+  });
+  wc.on('did-finish-load', () => sendToRecorder('rec:event', { type: 'load', label: 'Loaded' }));
   wc.on('did-finish-load', () => sendToAnimator('anim:page-changed'));
   wc.on('did-navigate-in-page', () => sendToAnimator('anim:page-changed'));
   wc.on('did-finish-load', invalidatePreview);
@@ -640,28 +897,210 @@ ipcMain.on('toast:answer', (_e, ok) => {
 
 ipcMain.handle('anim:load', () => {
   const key = animationKey();
-  return { key, stops: (key && store.animations[key]) || [] };
+  return { key, ...trackFor(key) };
 });
 
 ipcMain.handle('anim:capture', (_e, force) => getPreview(force));
 
-ipcMain.on('anim:set', (_e, { key, stops }) => {
+ipcMain.on('anim:set', (_e, { key, stops, cursor }) => {
   if (!key) return;
-  if (stops.length) store.animations[key] = stops;
-  else delete store.animations[key];
+  saveTrack(key, { stops: stops || [], cursor: cursor || [] });
+});
+
+ipcMain.handle('cursor:get', cursorPayload);
+ipcMain.handle('cursor:pick', pickCursorImage);
+ipcMain.on('cursor:set', (_e, partial) => {
+  store.cursor = { ...store.cursor, ...partial };
   save();
+  syncCursor();
 });
 
 ipcMain.on('anim:play', playAnimation);
 ipcMain.on('anim:close', () => animator && animator.close());
 ipcMain.on('anim:stop', () => page.webContents.send('anim:stop'));
 ipcMain.on('anim:seek', (_e, y) => page.webContents.send('anim:seek', y));
-ipcMain.on('anim:progress', (_e, data) => sendToAnimator('anim:progress', data));
+ipcMain.on('anim:progress', (_e, data) => {
+  sendToAnimator('anim:progress', data);
+  // The recorder times the pointer's cursor spans off playback.
+  sendToRecorder('rec:anim-progress', { playing: !!data.playing, elapsed: data.elapsed || 0 });
+  if (!!data.playing !== animPlaying) {
+    animPlaying = !!data.playing;
+    sendToRecorder('rec:event', { type: animPlaying ? 'anim-start' : 'anim-end', label: animPlaying ? 'Animation' : '' });
+  }
+});
+
+// ---- Recording -------------------------------------------------------------
+// The pane captures the page's WebContents (tab capture, so nothing but the
+// page is in the footage) and streams a finished MP4 here, chunk by chunk.
+ipcMain.on('rec:toggle', toggleRecording);
+ipcMain.on('rec:close-pane', closeRecorder);
+ipcMain.on('rec:reveal', revealLastRecording);
+ipcMain.handle('rec:init', () => ({
+  reload: store.reloadOnRecord !== false,
+  height: store.recordHeight || 'native',
+  blur: store.motionBlur || 0,
+  viewport: viewportPixels(),
+  cursor: cursorPayload(),
+  cursorSpans: trackFor(animationKey()).cursor,
+}));
+ipcMain.handle('rec:viewport', () => viewportPixels());
+ipcMain.on('rec:set-height', (_e, h) => {
+  store.recordHeight = h;
+  save();
+});
+ipcMain.on('rec:set-blur', (_e, deg) => {
+  store.motionBlur = +deg || 0;
+  save();
+});
+ipcMain.on('rec:velocity', (e, v) => e.sender === page.webContents && sendToRecorder('rec:velocity', v));
+ipcMain.on('rec:pointer', (e, p) => e.sender === page.webContents && sendToRecorder('rec:pointer', p));
+ipcMain.on('rec:cursor-image', (e, img) => e.sender === page.webContents && sendToRecorder('rec:cursor-image', img));
+ipcMain.on('rec:set-reload', (_e, on) => {
+  store.reloadOnRecord = !!on;
+  save();
+});
+ipcMain.on('rec:state', (_e, on) => setRecordingActive(!!on));
+
+ipcMain.handle('rec:source', () => {
+  const wc = page.webContents;
+  if (!/^https?:/.test(wc.getURL())) return { error: 'Open a page first (⌘L)' };
+  if (!recorderOpen()) return { error: 'Recording window closed' };
+  return { id: wc.getMediaSourceId(recorder.webContents), ...viewportPixels() };
+});
+
+ipcMain.handle('rec:open', () => {
+  if (recording) return { error: 'Already recording' };
+  try {
+    fs.mkdirSync(recordingsDir(), { recursive: true });
+    const name = recordingName();
+    const file = path.join(recordingsDir(), name);
+    recording = { fd: fs.openSync(file, 'w'), path: file, name };
+    return { path: file, name };
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.on('rec:write', (_e, position, data) => {
+  if (!recording) return;
+  try {
+    fs.writeSync(recording.fd, data, 0, data.byteLength, position);
+  } catch (err) {
+    console.error('recording write failed', err);
+  }
+});
+
+function finishRecording(keep) {
+  const rec = recording;
+  recording = null;
+  if (!rec) return null;
+  try {
+    fs.closeSync(rec.fd);
+  } catch {}
+  if (!keep) {
+    fs.rmSync(rec.path, { force: true });
+    return null;
+  }
+  lastRecording = rec.path;
+  return rec;
+}
+
+function afterRecording() {
+  if (closingForRecording) setTimeout(() => win.close(), 50);
+}
+
+ipcMain.handle('rec:finish', (_e, stats) => {
+  const rec = finishRecording(true);
+  if (rec) showToast(`Saved · ${rec.name}`);
+  if (process.env.DARC_SMOKE) console.log(JSON.stringify({ saved: rec && rec.path, ...stats }));
+  afterRecording();
+  return rec ? { path: rec.path, name: rec.name } : { error: 'No file open' };
+});
+
+ipcMain.handle('rec:cancel', () => {
+  finishRecording(false);
+  if (process.env.DARC_SMOKE) console.log(JSON.stringify({ saved: null }));
+  afterRecording();
+  return true;
+});
+
+// Reload for a fresh run of the page's load animations: from the top, since
+// Chromium restores the scroll position across a reload.
+ipcMain.on('rec:reload', async () => {
+  const wc = page.webContents;
+  await wc.executeJavaScript('window.scrollTo(0, 0)', true).catch(() => {});
+  pendingReload = true;
+  wc.reload();
+});
 
 app.whenReady().then(() => {
   if (!app.isPackaged) app.dock.setIcon(path.join(__dirname, '..', 'assets', 'icon.png'));
   buildMenu();
   createWindow();
+  if (process.env.DARC_SMOKE) smokeTest(process.env.DARC_SMOKE);
 });
+
+// DARC_SMOKE=<url> npm start — loads the page, records it for a few seconds,
+// prints the result as JSON and quits. For checking the pipeline end to end.
+function smokeTest(url) {
+  const wc = page.webContents;
+  if (process.env.DARC_SMOKE_BLUR) store.motionBlur = +process.env.DARC_SMOKE_BLUR;
+  if (process.env.DARC_SMOKE_HEIGHT) store.recordHeight = process.env.DARC_SMOKE_HEIGHT === 'native' ? 'native' : +process.env.DARC_SMOKE_HEIGHT;
+  if (process.env.DARC_SMOKE_CURSOR) store.cursor = { ...store.cursor, ...JSON.parse(process.env.DARC_SMOKE_CURSOR) };
+  const seconds = Number(process.env.DARC_SMOKE_SECONDS) || 4;
+  // A track for the page, e.g. '{"stops":[...],"cursor":[...]}', and when to play it.
+  if (process.env.DARC_SMOKE_TRACK) {
+    const u = new URL(url);
+    store.animations[u.origin + u.pathname] = JSON.parse(process.env.DARC_SMOKE_TRACK);
+  }
+  wc.once('did-finish-load', () => {
+    hideOverlay();
+    const size = (process.env.DARC_SMOKE_SIZE || '').match(/^(\d+)x(\d+)$/);
+    if (size) setWindowSize(+size[1], +size[2], 'smoke');
+    wc.loadURL(url);
+    wc.once('did-finish-load', () => {
+      // DARC_SMOKE_ANIMATOR_SHOT=<png>: screenshot the animation panel instead of recording.
+      if (process.env.DARC_SMOKE_ANIMATOR_SHOT) {
+        toggleAnimator();
+        animator.webContents.on('console-message', (e) => console.log(`[animator] ${e.message}`));
+        setTimeout(async () => {
+          if (process.env.DARC_SMOKE_ANIMATOR_JS) {
+            await animator.webContents.executeJavaScript(process.env.DARC_SMOKE_ANIMATOR_JS, true).catch((e) => console.log('smoke animator js', e.message));
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          const img = await animator.webContents.capturePage();
+          fs.writeFileSync(process.env.DARC_SMOKE_ANIMATOR_SHOT, img.toPNG());
+          app.exit(0);
+        }, 6000);
+        return;
+      }
+      setTimeout(() => {
+        toggleRecording();
+        recorder.webContents.on('console-message', (e) => console.log(`[recorder] ${e.message}`));
+        if (process.env.DARC_SMOKE_PLAY) {
+          setTimeout(playAnimation, +process.env.DARC_SMOKE_PLAY);
+        }
+        if (process.env.DARC_SMOKE_SCROLL) {
+          setTimeout(() => wc.send('anim:seek', +process.env.DARC_SMOKE_SCROLL), 1500);
+        }
+        if (process.env.DARC_SMOKE_JS) {
+          setTimeout(() => wc.executeJavaScript(process.env.DARC_SMOKE_JS, true).catch((e) => console.log('smoke js', e.message)), 2500);
+        }
+        setTimeout(toggleRecording, seconds * 1000);
+      }, 1500);
+    });
+  });
+  const orig = afterRecording;
+  afterRecording = () => {
+    orig();
+    setTimeout(async () => {
+      if (process.env.DARC_SMOKE_SHOT && recorderOpen()) {
+        const img = await recorder.webContents.capturePage();
+        fs.writeFileSync(process.env.DARC_SMOKE_SHOT, img.toPNG());
+      }
+      app.exit(0);
+    }, 600);
+  };
+}
 
 app.on('window-all-closed', () => app.quit());

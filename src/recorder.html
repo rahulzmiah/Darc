@@ -1,0 +1,943 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Record</title>
+<style>
+  * { box-sizing: border-box; margin: 0; border-radius: 0 !important; }
+  html, body { height: 100%; overflow: hidden; background: #0b0b0b; }
+  body {
+    display: flex; flex-direction: column;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    color: #ededed;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  html { border: 1px solid #2a2a2a; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+
+  .bar {
+    flex: none; height: 44px; padding: 0 10px 0 14px;
+    display: flex; align-items: center; gap: 12px;
+    -webkit-app-region: drag;
+  }
+  .bar > * { -webkit-app-region: no-drag; }
+  .btn { padding: 5px 10px; border: 1px solid #333; color: #bbb; white-space: nowrap; }
+  .btn:hover { color: #fff; border-color: #555; }
+  .btn:disabled { opacity: 0.35; pointer-events: none; }
+
+  #record { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 100px; border-color: #ff4d2e; color: #ff4d2e; font-weight: 600; }
+  #record:hover { background: rgba(255, 77, 46, 0.12); border-color: #ff4d2e; color: #ff6a50; }
+  #record .dot { width: 9px; height: 9px; background: currentColor; border-radius: 50% !important; }
+  body.recording #record { background: #ff4d2e; border-color: #ff4d2e; color: #fff; }
+  body.recording #record:hover { background: #ff6a50; color: #fff; }
+  body.recording #record .dot { border-radius: 0 !important; width: 8px; height: 8px; }
+  body.busy #record { opacity: 0.5; pointer-events: none; }
+
+  label.reload { display: flex; align-items: center; gap: 7px; color: #888; cursor: pointer; white-space: nowrap; }
+  label.reload:hover { color: #bbb; }
+  label.reload input { margin: 0; accent-color: #fff; }
+  .sel { padding: 4px 6px; background: #0b0b0b; border: 1px solid #2a2a2a; color: #bbb; outline: 0; font: inherit; max-width: 220px; }
+  .sel:hover { border-color: #444; color: #fff; }
+  .sel:disabled { opacity: 0.4; }
+
+  .time { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 64px; color: #555; }
+  body.recording .time { color: #fff; }
+  body.saved .time { color: #bbb; }
+  .live { width: 8px; height: 8px; background: #ff4d2e; display: none; }
+  body.recording .live { display: block; animation: blink 1.1s steps(2) infinite; }
+  @keyframes blink { to { opacity: 0.25; } }
+  .stats { color: #666; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stats b { color: #999; font-weight: 500; }
+  .stats.error { color: #ff8a8a; }
+  .spacer { flex: 1; min-width: 0; }
+  #reveal { display: none; }
+  body.saved #reveal { display: block; }
+  #close { color: #555; font-size: 18px; line-height: 1; padding: 0 4px; }
+  #close:hover { color: #fff; }
+  #close:disabled { opacity: 0.3; }
+
+  #timeline { flex: 1; position: relative; min-height: 0; }
+  #timeline canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button class="btn" id="record" title="Record the page (⌘E)"><span class="dot"></span><span class="label">Record</span></button>
+  <label class="reload" title="Reload the page as recording starts so its load animations play again"><input type="checkbox" id="reload"> Reload page</label>
+  <select class="sel" id="res" title="Output resolution"></select>
+  <select class="sel" id="blur" title="Motion blur while the page scrolls, added to the footage only">
+    <option value="0">No motion blur</option>
+    <option value="45">Motion blur · subtle</option>
+    <option value="90">Motion blur · normal</option>
+    <option value="180">Motion blur · strong</option>
+  </select>
+  <span class="live"></span>
+  <span class="time" id="time">0:00.0</span>
+  <span class="stats" id="stats">Press Record to capture the page · reload plays its load animations again</span>
+  <span class="spacer"></span>
+  <button class="btn" id="anim" title="Play the page's scroll animation (⌘↩)">▶ Animation</button>
+  <button class="btn" id="reveal" title="Show the recording in Finder">Reveal</button>
+  <button id="close" title="Close (⌥⌘E)">×</button>
+</div>
+<div id="timeline"><canvas id="canvas"></canvas></div>
+
+<script src="vendor/mp4-muxer.js"></script>
+<script>
+  const FPS = 60;
+  const $ = (id) => document.getElementById(id);
+
+  let state = 'idle'; // idle | starting | recording | stopping | saved
+  let session = null;
+  let events = []; // { t, label, row }
+  let spans = []; // animation playback: { start, end }
+  let result = null; // stats of the last finished recording
+  let plan = null; // encoder plan for the current/last recording
+  let viewport = null; // { width, height, css } physical size of the page view
+  let prefHeight = 'native'; // chosen output height, or 'native'
+  let cursorSettings = { mode: 'off' }; // pointer overlay settings, from the animation panel
+  let cursorSpans = []; // when the pointer shows during this page's animation, [{ start, end }] ms
+  let lastPointer = null; // latest mouse position over the page
+  let animProgress = { playing: false, elapsed: 0 };
+  const cursorImageData = new Map(); // CSS cursor images the page has sent, by id
+
+  // ---- Output resolution -------------------------------------------------
+  // Native is the viewport in physical pixels; the rest are downscales that
+  // keep its aspect ratio. Downscaling happens in the capturer, before encoding.
+  const HEIGHTS = [2160, 1800, 1600, 1440, 1200, 1080, 900, 720];
+  function resOptions() {
+    if (!viewport) return [];
+    const { width: w, height: h } = viewport;
+    const opts = [{ value: 'native', width: even(w), height: even(h), label: `${even(w)} × ${even(h)} · native` }];
+    for (const hh of HEIGHTS) {
+      if (hh >= h) continue;
+      const one = Math.abs(hh - viewport.css.height) < 1 ? ' · 1×' : '';
+      opts.push({ value: hh, width: even((hh * w) / h), height: even(hh), label: `${even((hh * w) / h)} × ${even(hh)}${one}` });
+    }
+    return opts;
+  }
+  function renderRes() {
+    const opts = resOptions();
+    $('res').innerHTML = opts.map((o) => `<option value="${o.value}">${o.label}</option>`).join('');
+    $('res').value = opts.some((o) => String(o.value) === String(prefHeight)) ? String(prefHeight) : 'native';
+  }
+  function chosenSize() {
+    const opts = resOptions();
+    return opts.find((o) => String(o.value) === $('res').value) || opts[0];
+  }
+  $('res').addEventListener('change', () => {
+    prefHeight = $('res').value === 'native' ? 'native' : +$('res').value;
+    narc.setHeight(prefHeight);
+    $('res').blur();
+  });
+  $('blur').addEventListener('change', () => {
+    narc.setBlur(+$('blur').value);
+    $('blur').blur();
+  });
+  narc.onViewport((v) => {
+    viewport = v;
+    if (state !== 'recording') renderRes();
+  });
+
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const fmtBytes = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`);
+  const fmtClock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}.${Math.floor((s % 1) * 10)}`;
+  const fmtTick = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+
+  function elapsed() {
+    if (session) return session.elapsed();
+    if (result) return result.seconds;
+    return 0;
+  }
+
+  function setState(s) {
+    state = s;
+    document.body.classList.toggle('recording', s === 'recording');
+    document.body.classList.toggle('busy', s === 'starting' || s === 'stopping');
+    document.body.classList.toggle('saved', s === 'saved');
+    $('record').querySelector('.label').textContent = s === 'recording' ? 'Stop' : s === 'stopping' ? 'Saving…' : s === 'starting' ? 'Starting…' : 'Record';
+    $('close').disabled = s === 'recording' || s === 'stopping' || s === 'starting';
+    $('res').disabled = $('blur').disabled = $('reload').disabled = s !== 'idle' && s !== 'saved';
+    narc.state(s === 'recording' || s === 'starting' || s === 'stopping');
+  }
+
+  function status(html, error) {
+    $('stats').innerHTML = html;
+    $('stats').classList.toggle('error', !!error);
+  }
+
+  function renderStats() {
+    $('time').textContent = fmtClock(elapsed());
+    if (state === 'recording' && session && plan) {
+      const s = session;
+      const drop = s.dropped ? ` · <b>${s.dropped}</b> dropped` : '';
+      const blur = s.blur ? ` · blur ${s.motion.shutter}°` : '';
+      const cursor = s.cursor && s.cursor.settings.mode !== 'off' ? ' · cursor' : '';
+      status(`<b>${plan.width}×${plan.height}</b> · ${FPS} fps · ${plan.label}${blur}${cursor} · <b>${fmtBytes(s.bytes)}</b>${drop}`);
+    } else if (state === 'saved' && result) {
+      const drop = result.dropped ? ` · ${result.dropped} dropped` : '';
+      status(`Saved <b>${result.name}</b> · ${result.width}×${result.height} · ${fmtBytes(result.bytes)}${drop}`);
+    }
+  }
+
+  // ---- Timeline ----------------------------------------------------------
+  const canvas = $('canvas');
+  const RANGES = [20, 30, 60, 90, 120, 180, 300, 600, 900, 1200, 1800, 2700, 3600];
+  const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800];
+  const niceRange = (v) => RANGES.find((r) => r >= v) || Math.ceil(v / 1800) * 1800;
+
+  function draw() {
+    const dpr = devicePixelRatio;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (!w || !h) return;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    const padL = 14;
+    const padR = 14;
+    const trackY = h - 20;
+    const inner = w - padL - padR;
+    const now = elapsed();
+    const range = niceRange(Math.max(20, now * 1.15));
+    const x = (t) => padL + (t / range) * inner;
+
+    // Axis and ticks.
+    const step = STEPS.find((s) => range / s <= inner / 64) || STEPS[STEPS.length - 1];
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#222';
+    ctx.fillRect(padL, trackY, inner, 1);
+    for (let t = 0; t <= range + 1e-6; t += step) {
+      ctx.fillStyle = '#2e2e2e';
+      ctx.fillRect(Math.round(x(t)), trackY - 4, 1, 5);
+      ctx.fillStyle = '#555';
+      ctx.fillText(fmtTick(t), x(t), trackY + 5);
+    }
+
+    // Animation playback spans.
+    for (const s of spans) {
+      const end = s.end == null ? now : s.end;
+      ctx.fillStyle = 'rgba(77, 163, 255, 0.28)';
+      ctx.fillRect(x(s.start), trackY - 12, Math.max(2, x(end) - x(s.start)), 8);
+    }
+
+    // Recorded bar.
+    if (state !== 'idle') {
+      ctx.fillStyle = state === 'saved' ? '#bbb' : '#ff4d2e';
+      ctx.fillRect(padL, trackY - 3, Math.max(0, x(now) - padL), 3);
+    }
+
+    // Event markers, on two staggered rows so nearby labels don't collide.
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+    let lastX = -Infinity;
+    let row = 0;
+    for (const ev of events) {
+      const ex = Math.round(x(ev.t));
+      row = ex - lastX < 70 ? 1 - row : 0;
+      lastX = ex;
+      const top = trackY - 44 + row * 14;
+      ctx.fillStyle = ev.type === 'reload' ? '#ff4d2e' : '#ddd';
+      ctx.fillRect(ex, top, 1, trackY - top);
+      ctx.fillStyle = ev.type === 'reload' ? '#ff8a70' : '#999';
+      ctx.fillText(ev.label, ex + 4, top + 9);
+    }
+
+    if (state === 'recording') {
+      ctx.fillStyle = '#ff4d2e';
+      ctx.fillRect(Math.round(x(now)) - 1, trackY - 16, 2, 20);
+    }
+  }
+
+  let raf = 0;
+  function loop() {
+    draw();
+    renderStats();
+    raf = state === 'recording' || state === 'starting' || state === 'stopping' ? requestAnimationFrame(loop) : 0;
+  }
+  function refresh() {
+    if (!raf) loop();
+  }
+  new ResizeObserver(draw).observe($('timeline'));
+
+  function mark(type, label) {
+    if (!session) return;
+    const t = session.elapsed();
+    if (type === 'anim-start') spans.push({ start: t, end: null });
+    else if (type === 'anim-end') {
+      const open = spans.find((s) => s.end == null);
+      if (open) open.end = t;
+      return;
+    }
+    if (label) events.push({ t, type, label });
+  }
+
+  // ---- Encoding plan -----------------------------------------------------
+  // Full physical resolution with a hardware H.264 encoder is the goal. HEVC
+  // covers huge Retina viewports H.264 can't, and the last resorts scale down.
+  function fit(w, h, maxW, maxH) {
+    const k = Math.min(1, maxW / w, maxH / h);
+    return [even(w * k), even(h * k)];
+  }
+  function bitrateFor(w, h) {
+    return Math.round(Math.min(120e6, Math.max(8e6, w * h * FPS * 0.14)));
+  }
+
+  async function pickEncoding(w, h) {
+    const avcLevel = (pw, ph) => (pw * ph > 4096 * 2304 ? '3c' : '34');
+    const attempts = [
+      { size: [even(w), even(h)], container: 'avc', hw: 'prefer-hardware', label: 'H.264' },
+      { size: [even(w), even(h)], container: 'hevc', hw: 'prefer-hardware', label: 'HEVC' },
+      { size: fit(w, h, 3840, 2160), container: 'avc', hw: 'prefer-hardware', label: 'H.264' },
+      { size: fit(w, h, 3840, 2160), container: 'avc', hw: 'no-preference', label: 'H.264' },
+      { size: fit(w, h, 1920, 1080), container: 'avc', hw: 'no-preference', label: 'H.264' },
+    ];
+    for (const a of attempts) {
+      const [pw, ph] = a.size;
+      const codec = a.container === 'hevc' ? 'hvc1.1.6.L186.B0' : `avc1.6400${avcLevel(pw, ph)}`;
+      const config = {
+        codec,
+        width: pw,
+        height: ph,
+        bitrate: bitrateFor(pw, ph),
+        framerate: FPS,
+        hardwareAcceleration: a.hw,
+        latencyMode: 'quality',
+        bitrateMode: 'variable',
+      };
+      if (a.container === 'hevc') config.hevc = { format: 'hevc' };
+      else config.avc = { format: 'avc' };
+      try {
+        const res = await VideoEncoder.isConfigSupported(config);
+        if (res.supported) return { ...a, width: pw, height: ph, config, label: `${a.label}${a.hw === 'prefer-hardware' ? '' : ' (software)'}` };
+      } catch {}
+    }
+    throw new Error('No video encoder available');
+  }
+
+  // ---- Motion blur ---------------------------------------------------------
+  // Each captured frame is smeared along the page's scroll velocity, as a
+  // camera with the given shutter angle would. A frame-difference mask keeps
+  // pixels that didn't change (sticky headers, fixed UI) sharp.
+  const MAX_TAPS = 48;
+  class MotionBlur {
+    constructor(width, height, scale) {
+      this.width = width;
+      this.height = height;
+      this.scale = scale; // output px per CSS px; taps are spaced per CSS px
+      // Big frames get fewer taps so the pass keeps up at 60 fps.
+      const big = width * height > 4.5e6;
+      this.maxTaps = big ? 16 : MAX_TAPS;
+      this.maxSmear = (big ? 40 : 64) * scale; // output px; keeps taps close enough not to band
+      this.canvas = new OffscreenCanvas(width, height);
+      const gl = (this.gl = this.canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true }));
+      if (!gl) throw new Error('WebGL unavailable for motion blur');
+      const compile = (type, src) => {
+        const sh = gl.createShader(type);
+        gl.shaderSource(sh, src);
+        gl.compileShader(sh);
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+        return sh;
+      };
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, `#version 300 es
+        const vec2 pos[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+        out vec2 uv;
+        void main() { gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0); uv = pos[gl_VertexID] * 0.5 + 0.5; }`));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, `#version 300 es
+        precision highp float;
+        uniform sampler2D cur;
+        uniform sampler2D prev;
+        uniform vec2 vel;
+        uniform float hasPrev;
+        uniform int taps;
+        in vec2 uv;
+        out vec4 color;
+        void main() {
+          vec3 c = texture(cur, uv).rgb;
+          if (taps < 2) { color = vec4(c, 1.0); return; }
+          vec3 acc = vec3(0.0);
+          float diff = 0.0;
+          for (int i = 0; i < ${MAX_TAPS}; i++) {
+            if (i >= taps) break;
+            float t = float(i) / float(taps - 1) - 0.5;
+            vec2 p = clamp(uv + vel * t, 0.0, 1.0);
+            vec3 s = texture(cur, p).rgb;
+            acc += s;
+            if ((i & 1) == 0) diff = max(diff, length(s - texture(prev, p).rgb));
+          }
+          acc /= float(taps);
+          float m = hasPrev > 0.5 ? smoothstep(0.02, 0.08, diff) : 1.0;
+          color = vec4(mix(c, acc, m), 1.0);
+        }`));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+      gl.useProgram(prog);
+      gl.uniform1i(gl.getUniformLocation(prog, 'cur'), 0);
+      gl.uniform1i(gl.getUniformLocation(prog, 'prev'), 1);
+      this.uVel = gl.getUniformLocation(prog, 'vel');
+      this.uHasPrev = gl.getUniformLocation(prog, 'hasPrev');
+      this.uTaps = gl.getUniformLocation(prog, 'taps');
+      this.tex = [0, 1].map(() => {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+      });
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.viewport(0, 0, width, height);
+      this.uploads = 0;
+    }
+
+    // Newest frame becomes `cur`; the one before it is `prev`.
+    upload(frame) {
+      const gl = this.gl;
+      this.tex.reverse();
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex[0]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex[1]);
+      this.uploads++;
+    }
+
+    // dx, dy: total smear length in output pixels (0, 0 passes the frame through).
+    render(dx, dy) {
+      const gl = this.gl;
+      const len = Math.hypot(dx, dy);
+      // Roughly one tap per pixel of smear, so fast scrolls don't band.
+      gl.uniform1i(this.uTaps, len < 0.75 ? 0 : Math.min(this.maxTaps, Math.max(4, Math.ceil(len / this.scale) + 1)));
+      gl.uniform2f(this.uVel, dx / this.width, dy / this.height);
+      gl.uniform1f(this.uHasPrev, this.uploads > 1 ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      return this.canvas;
+    }
+  }
+
+  // ---- Cursor overlay ------------------------------------------------------
+  // The tab capture has no pointer in it, so one is drawn onto each frame from
+  // the page's mouse position. A damped spring smooths the raw movement, and
+  // the page's cursor spans (set in the animation panel) fade it in and out
+  // during animation playback. It goes on after motion blur, so it stays sharp.
+  const svgUrl = (svg) => `data:image/svg+xml,${encodeURIComponent(svg)}`;
+  const SHAPES = {
+    arrow: {
+      w: 16, h: 22, hx: 1.5, hy: 1.5,
+      src: svgUrl('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="22" viewBox="0 0 16 22"><path d="M1.5 1.5v16.3l4.3-4 3 6.8 3-1.3-3-6.7h6.2z" fill="#000" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>'),
+    },
+    hand: {
+      w: 24, h: 24, hx: 9.8, hy: 2,
+      src: svgUrl('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M8.5 15V3.3a1.3 1.3 0 0 1 2.6 0V11h.6V7.8a1.3 1.3 0 0 1 2.6 0V11h.6V8.8a1.3 1.3 0 0 1 2.6 0v2.7h.6V10a1.3 1.3 0 0 1 2.6 0v6c0 3.8-2.6 6.5-6.4 6.5h-2.4c-2.2 0-3.7-.8-4.9-2.4l-3.9-5.2a1.5 1.5 0 0 1 2.4-1.8z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>'),
+    },
+    text: {
+      w: 10, h: 20, hx: 5, hy: 10,
+      src: svgUrl('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20" viewBox="0 0 10 20"><path id="i" d="M2.5 1.5h2c.3 0 .5.2.5.5v16c0 .3-.2.5-.5.5h-2M7.5 1.5h-2c-.3 0-.5.2-.5.5v16c0 .3.2.5.5.5h2" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/><use href="#i" stroke="#000" stroke-width="1.2"/></svg>'),
+    },
+  };
+  const loadImage = (src) => {
+    const img = new Image();
+    img.src = src;
+    return img;
+  };
+  const ready = (img) => !!img && img.complete && img.naturalWidth > 0;
+
+  class CursorLayer {
+    constructor({ settings, spans, scale, images, pointer, anim }, width, height) {
+      this.width = width;
+      this.height = height;
+      this.scale = scale; // output px per CSS px
+      this.pos = null; // drawn position, output px
+      this.vel = { x: 0, y: 0 };
+      this.target = null; // where the real pointer is
+      this.inside = false;
+      this.shape = { type: 'arrow' };
+      this.alpha = 0;
+      this.anim = anim || { playing: false, elapsed: 0 };
+      this.images = new Map();
+      for (const [id, data] of images || []) this.images.set(id, loadImage(data));
+      this.builtin = {};
+      for (const [name, def] of Object.entries(SHAPES)) this.builtin[name] = loadImage(def.src);
+      this.setSpans(spans);
+      this.configure(settings);
+      if (pointer) this.pointer(pointer);
+    }
+
+    configure(settings) {
+      const same = this.settings && this.settings.image === settings.image;
+      this.settings = settings;
+      if (!same) this.custom = settings.image ? loadImage(settings.image) : null;
+    }
+
+    setSpans(spans) {
+      this.spans = (spans || []).filter((s) => s.end > s.start);
+    }
+
+    pointer(p) {
+      this.target = { x: p.x * this.width, y: p.y * this.height };
+      this.inside = !!p.inside;
+      this.shape = p.shape || { type: 'arrow' };
+      if (!this.pos) this.pos = { ...this.target };
+    }
+
+    image({ id, data }) {
+      this.images.set(id, loadImage(data));
+    }
+
+    progress(p) {
+      this.anim = p;
+    }
+
+    // Target opacity: hidden when the page has no pointer over it or hides its
+    // own cursor, and outside the page's cursor spans when it has any.
+    wanted() {
+      const s = this.settings;
+      if (s.mode === 'off' || !this.inside || !this.pos) return 0;
+      if (s.mode === 'auto' && this.shape.type === 'none') return 0;
+      if (!this.spans.length) return 1;
+      if (!this.anim.playing) return 0;
+      const t = this.anim.elapsed;
+      return this.spans.some((sp) => t >= sp.start && t < sp.end) ? 1 : 0;
+    }
+
+    // Advance the spring and the fade by one frame of video time.
+    step(dt) {
+      if (!this.target) return;
+      const { smoothing, damping } = this.settings;
+      if (!(smoothing > 0)) {
+        this.pos = { ...this.target };
+        this.vel = { x: 0, y: 0 };
+      } else {
+        const omega = 6 / (smoothing / 1000); // ~98% settled after `smoothing` when critically damped
+        const zeta = Math.max(0.05, +damping || 1);
+        const n = Math.max(1, Math.ceil((omega * dt) / 0.2)); // substeps keep stiff springs stable
+        const h = dt / n;
+        for (let i = 0; i < n; i++) {
+          for (const a of ['x', 'y']) {
+            const x = this.pos[a] - this.target[a];
+            this.vel[a] += (-2 * zeta * omega * this.vel[a] - omega * omega * x) * h;
+            this.pos[a] += this.vel[a] * h;
+          }
+        }
+      }
+      const want = this.wanted();
+      const fade = dt / 0.25;
+      this.alpha = want > this.alpha ? Math.min(want, this.alpha + fade) : Math.max(want, this.alpha - fade);
+    }
+
+    draw(ctx) {
+      if (this.alpha <= 0.005 || !this.pos) return;
+      const s = this.settings;
+      const k = this.scale;
+      const shape = s.mode === 'auto' ? this.shape : null;
+      let img, w, h, hx, hy;
+      if (s.mode === 'custom' && ready(this.custom)) {
+        img = this.custom;
+        h = s.size * k;
+        w = (img.naturalWidth / img.naturalHeight) * h;
+        hx = s.hotspot === 'center' ? w / 2 : 0;
+        hy = s.hotspot === 'center' ? h / 2 : 0;
+      } else if (shape && shape.type === 'url' && ready(this.images.get(shape.id))) {
+        // Image cursors from the page's CSS keep their own size and hotspot.
+        img = this.images.get(shape.id);
+        w = img.naturalWidth * k;
+        h = img.naturalHeight * k;
+        hx = shape.hx * k;
+        hy = shape.hy * k;
+      } else {
+        const name = shape && SHAPES[shape.type] ? shape.type : 'arrow';
+        const def = SHAPES[name];
+        img = this.builtin[name];
+        if (!ready(img)) return;
+        h = s.size * k;
+        const u = h / def.h;
+        w = def.w * u;
+        hx = def.hx * u;
+        hy = def.hy * u;
+      }
+      ctx.globalAlpha = this.alpha;
+      ctx.drawImage(img, Math.round(this.pos.x - hx), Math.round(this.pos.y - hy), w, h);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---- Recording session -------------------------------------------------
+  // Frames from the tab capture are re-timed onto a fixed 60 fps grid: every
+  // 1/60 s the newest frame is encoded, so the file is constant-frame-rate even
+  // though the capturer only emits frames when the page repaints.
+  class Session {
+    constructor(stream, plan, motion, cursor) {
+      this.stream = stream;
+      this.plan = plan;
+      this.motion = motion; // { shutter (degrees), scale (output px per CSS px) } or null
+      this.cursor = cursor ? new CursorLayer(cursor, plan.width, plan.height) : null;
+      if (this.cursor) {
+        // Frames pass through a 2D canvas to get the pointer drawn on.
+        this.compose = new OffscreenCanvas(plan.width, plan.height);
+        this.composeCtx = this.compose.getContext('2d', { alpha: false, desynchronized: true });
+      }
+      this.vel = { vx: 0, vy: 0 }; // CSS px/s, smoothed
+      this.samples = []; // recent raw velocity samples
+      this.serial = 0; // bumps when a new frame arrives
+      this.uploaded = -1;
+      this.blurred = 0;
+      this.track = stream.getVideoTracks()[0];
+      this.latest = null;
+      this.encoder = null;
+      this.muxer = null;
+      this.index = 0;
+      this.encoded = 0;
+      this.dropped = 0;
+      this.bytes = 0;
+      this.error = null;
+      this.stopping = null;
+      this.started = performance.now();
+      this.timer = setInterval(() => this.tick(), 4);
+      this.reader = new MediaStreamTrackProcessor({ track: this.track }).readable.getReader();
+      this.pump();
+      this.track.addEventListener('ended', () => stop());
+    }
+
+    elapsed() {
+      return (performance.now() - this.started) / 1000;
+    }
+
+    async pump() {
+      for (;;) {
+        let r;
+        try {
+          r = await this.reader.read();
+        } catch {
+          break;
+        }
+        if (r.done) break;
+        const frame = r.value;
+        if (!this.encoder && !this.error) {
+          try {
+            this.setup(frame);
+          } catch (err) {
+            this.fail(err);
+          }
+        }
+        if (this.latest) this.latest.close();
+        this.latest = this.stopping ? null : frame;
+        this.serial++;
+        if (this.stopping) frame.close();
+      }
+    }
+
+    setup(frame) {
+      const { plan } = this;
+      const width = plan.width;
+      const height = plan.height;
+      const target = new Mp4Muxer.StreamTarget({
+        chunked: true,
+        onData: (data, position) => {
+          this.bytes = Math.max(this.bytes, position + data.byteLength);
+          // Send an exact copy: structured clone would ship the whole backing buffer.
+          narc.write(position, data.slice());
+        },
+      });
+      this.muxer = new Mp4Muxer.Muxer({
+        target,
+        video: { codec: plan.container, width, height, frameRate: FPS },
+        fastStart: false,
+        firstTimestampBehavior: 'offset',
+      });
+      const encoder = new VideoEncoder({
+        output: (chunk, meta) => this.muxer.addVideoChunk(chunk, meta),
+        error: (err) => this.fail(err),
+      });
+      encoder.configure({ ...plan.config, width, height });
+      this.encoder = encoder;
+      this.frameWidth = frame.displayWidth;
+      this.frameHeight = frame.displayHeight;
+      if (this.motion && this.motion.shutter > 0) {
+        try {
+          this.blur = new MotionBlur(width, height, this.motion.scale);
+        } catch (err) {
+          console.error(err);
+          this.blur = null;
+        }
+      }
+    }
+
+    setVelocity({ vx, vy, jump }) {
+      if (jump) {
+        this.samples = [];
+        this.vel = { vx: 0, vy: 0 };
+        return;
+      }
+      // Blur only motion that persists: each axis takes the smaller of the
+      // last two samples when they agree in direction, so a one-frame spike
+      // (DOM swap, layout shift) doesn't smear the whole picture.
+      this.samples.push({ vx, vy });
+      if (this.samples.length > 2) this.samples.shift();
+      const steady = (a) => {
+        if (this.samples.length < 2) return 0;
+        const [p, q] = this.samples.map((s) => s[a]);
+        return Math.sign(p) === Math.sign(q) ? Math.sign(p) * Math.min(Math.abs(p), Math.abs(q)) : 0;
+      };
+      this.vel.vx = this.vel.vx * 0.4 + steady('vx') * 0.6;
+      this.vel.vy = this.vel.vy * 0.4 + steady('vy') * 0.6;
+    }
+
+    // Smear vector for the current velocity, in output pixels.
+    smear() {
+      if (!this.blur) return [0, 0];
+      const exposure = this.motion.shutter / 360 / FPS; // seconds the shutter is open
+      let dx = this.vel.vx * this.motion.scale * exposure;
+      let dy = this.vel.vy * this.motion.scale * exposure;
+      const len = Math.hypot(dx, dy);
+      const cap = this.blur.maxSmear;
+      if (len > cap) {
+        dx *= cap / len;
+        dy *= cap / len;
+      }
+      return [dx, dy];
+    }
+
+    tick() {
+      if (!this.encoder || !this.latest || this.stopping) return;
+      const period = 1000 / FPS;
+      const due = Math.floor((performance.now() - this.started) / period);
+      // If the encoder starves us for over a second, skip ahead rather than
+      // flooding it with a burst of identical frames.
+      if (due - this.index > FPS) {
+        this.dropped += due - this.index - 1;
+        this.index = due - 1;
+      }
+      while (this.index < due) {
+        if (this.encoder.encodeQueueSize > 24) {
+          this.dropped++;
+          this.index++;
+          continue;
+        }
+        const timing = { timestamp: Math.round((this.index * 1e6) / FPS), duration: Math.round(1e6 / FPS) };
+        let f;
+        try {
+          if (this.blur && this.uploaded !== this.serial) {
+            this.blur.upload(this.latest);
+            this.uploaded = this.serial;
+          }
+          // With blur or the cursor on, every frame goes through the canvas
+          // passes (even when still), so the encoder sees one frame format
+          // from the start.
+          let source = this.latest;
+          if (this.blur) {
+            const [dx, dy] = this.smear();
+            source = this.blur.render(dx, dy);
+            if (Math.hypot(dx, dy) >= 0.75) this.blurred++;
+          }
+          if (this.cursor) {
+            this.cursor.step(1 / FPS);
+            this.composeCtx.drawImage(source, 0, 0, this.plan.width, this.plan.height);
+            this.cursor.draw(this.composeCtx);
+            source = this.compose;
+          }
+          f = new VideoFrame(source, timing);
+        } catch (err) {
+          this.fail(err);
+          return;
+        }
+        try {
+          this.encoder.encode(f, { keyFrame: this.index % (FPS * 2) === 0 });
+          this.encoded++;
+        } catch (err) {
+          this.fail(err);
+        } finally {
+          f.close();
+        }
+        this.index++;
+      }
+    }
+
+    fail(err) {
+      if (this.error) return;
+      this.error = err;
+      console.error(err);
+      stop();
+    }
+
+    // Stops capture, drains the encoder and writes the MP4 index. Resolves
+    // with the saved file's stats, or null if nothing usable was captured.
+    stop() {
+      if (this.stopping) return this.stopping;
+      this.stopping = (async () => {
+        clearInterval(this.timer);
+        const seconds = this.index / FPS;
+        this.track.stop();
+        try {
+          await this.reader.cancel();
+        } catch {}
+        if (this.latest) {
+          this.latest.close();
+          this.latest = null;
+        }
+        let ok = false;
+        if (this.encoder && this.encoded && !this.error) {
+          try {
+            await this.encoder.flush();
+            this.muxer.finalize();
+            ok = true;
+          } catch (err) {
+            this.error = err;
+          }
+        }
+        try {
+          if (this.encoder && this.encoder.state !== 'closed') this.encoder.close();
+        } catch {}
+        if (!ok) {
+          await narc.cancel();
+          return null;
+        }
+        const saved = await narc.finish({ seconds, bytes: this.bytes, frames: this.encoded, dropped: this.dropped });
+        return { ...saved, seconds, bytes: this.bytes, frames: this.encoded, dropped: this.dropped, width: this.plan.width, height: this.plan.height };
+      })();
+      return this.stopping;
+    }
+  }
+
+  async function start() {
+    if (state !== 'idle' && state !== 'saved') return;
+    setState('starting');
+    result = null;
+    events = [];
+    spans = [];
+    refresh();
+    let stream;
+    try {
+      const src = await narc.source();
+      if (src.error) throw new Error(src.error);
+      viewport = src;
+      renderRes();
+      const size = chosenSize();
+      plan = await pickEncoding(size.width, size.height);
+      console.log(`plan ${plan.width}x${plan.height} ${plan.label} from viewport ${src.width}x${src.height} (css ${src.css.width}x${src.css.height}), option ${$('res').value}`);
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: 'tab',
+            chromeMediaSourceId: src.id,
+            minWidth: plan.width,
+            maxWidth: plan.width,
+            minHeight: plan.height,
+            maxHeight: plan.height,
+            maxFrameRate: FPS,
+          },
+        },
+      });
+      const file = await narc.open();
+      if (file.error) throw new Error(file.error);
+      const shutter = +$('blur').value;
+      const scale = plan.width / src.css.width;
+      const cursor = cursorSettings.mode !== 'off'
+        ? { settings: cursorSettings, spans: cursorSpans, scale, images: cursorImageData, pointer: lastPointer, anim: animProgress }
+        : null;
+      session = new Session(stream, plan, shutter > 0 ? { shutter, scale } : null, cursor);
+      setState('recording');
+      if ($('reload').checked) {
+        narc.reload();
+        mark('reload', 'Reload');
+      }
+    } catch (err) {
+      if (stream) for (const t of stream.getTracks()) t.stop();
+      setState('idle');
+      status(`Couldn't start: ${String(err.message || err).replace(/^.*Error: /, '')}`, true);
+    }
+    refresh();
+  }
+
+  async function stop() {
+    if (!session || state !== 'recording') return;
+    const s = session;
+    setState('stopping');
+    const saved = await s.stop();
+    session = null;
+    if (saved) {
+      result = saved;
+      setState('saved');
+    } else {
+      setState('idle');
+      status(s.error ? `Recording failed: ${s.error.message || s.error}` : 'Nothing was captured', true);
+    }
+    draw();
+    renderStats();
+  }
+
+  function toggle() {
+    if (state === 'recording') stop();
+    else start();
+  }
+
+  $('record').addEventListener('click', toggle);
+  $('reveal').addEventListener('click', () => narc.reveal());
+  $('close').addEventListener('click', () => narc.close());
+  $('anim').addEventListener('click', () => (animPlaying ? narc.stopAnimation() : narc.playAnimation()));
+  $('reload').addEventListener('change', () => {
+    narc.setReload($('reload').checked);
+    $('reload').blur();
+  });
+
+  let animPlaying = false;
+  narc.onEvent((ev) => {
+    if (ev.type === 'anim-start' || ev.type === 'anim-end') {
+      animPlaying = ev.type === 'anim-start';
+      $('anim').textContent = animPlaying ? '■ Animation' : '▶ Animation';
+    }
+    mark(ev.type, ev.label);
+  });
+  narc.onToggle(toggle);
+  narc.onVelocity((v) => session && session.setVelocity(v));
+  const layer = () => session && session.cursor;
+  narc.onPointer((p) => {
+    lastPointer = p;
+    if (layer()) layer().pointer(p);
+  });
+  narc.onCursorImage((img) => {
+    cursorImageData.set(img.id, img.data);
+    if (layer()) layer().image(img);
+  });
+  narc.onCursor((c) => {
+    cursorSettings = c;
+    if (layer()) layer().configure(c);
+  });
+  narc.onCursorSpans((spans) => {
+    cursorSpans = spans || [];
+    if (layer()) layer().setSpans(cursorSpans);
+  });
+  narc.onAnimProgress((p) => {
+    animProgress = p;
+    if (layer()) layer().progress(p);
+  });
+  narc.onStop(stop);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && animPlaying) narc.stopAnimation();
+  });
+
+  narc.init().then((data) => {
+    $('reload').checked = data.reload !== false;
+    prefHeight = data.height || 'native';
+    $('blur').value = String([0, 45, 90, 180].includes(+data.blur) ? +data.blur : 0);
+    cursorSettings = data.cursor || cursorSettings;
+    cursorSpans = data.cursorSpans || [];
+    viewport = data.viewport;
+    renderRes();
+    draw();
+    renderStats();
+  });
+</script>
+</body>
+</html>

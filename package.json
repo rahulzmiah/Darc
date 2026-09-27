@@ -1,7 +1,7 @@
 {
   "name": "darc",
   "productName": "Darc",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A chrome-less Chromium browser for recording buttery-smooth website footage.",
   "main": "src/main.js",
   "private": true,
@@ -18,7 +18,8 @@
   "type": "commonjs",
   "devDependencies": {
     "electron": "^44.4.5",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "mp4-muxer": "^5.2.2"
   },
   "build": {
     "appId": "com.rahulmiah.darc",

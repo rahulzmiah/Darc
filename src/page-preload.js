@@ -269,7 +269,9 @@ function stopPlayback() {
   ipcRenderer.send('anim:progress', { playing: false });
 }
 
-function play(stops) {
+// `cue`: the line a cursor path starts at. Playback waits there, as the move
+// to it ends, until the path has played (anim:resume).
+function play(stops, cue) {
   stopPlayback();
   const el = root();
   animations.delete(el);
@@ -283,21 +285,51 @@ function play(stops) {
     segments.push({ start: t, end: t + Math.max(0, stop.hold), from: stop.y, to: stop.y, ease: (p) => p, index: i });
     t += Math.max(0, stop.hold);
   });
-  playback = { segments, total: t, start: performance.now(), raf: 0 };
+  const cueAt = cue != null && segments[cue * 2] ? segments[cue * 2].end : null;
+  playback = { segments, total: t, start: performance.now(), raf: 0, cueAt, paused: null, tick: null };
   const tick = (now) => {
-    const elapsed = now - playback.start;
+    let elapsed = now - playback.start;
+    const cued = playback.cueAt != null && elapsed >= playback.cueAt;
+    if (cued) elapsed = playback.cueAt;
     const seg = segments.find((s) => elapsed < s.end) || segments[segments.length - 1];
     const p = seg.end > seg.start ? Math.min(1, Math.max(0, (elapsed - seg.start) / (seg.end - seg.start))) : 1;
     const y = Math.max(0, Math.min(maxScroll(el).y, seg.from + (seg.to - seg.from) * seg.ease(p)));
     el.scrollTo({ top: y, behavior: 'instant' });
     ipcRenderer.send('anim:progress', { playing: true, y, elapsed: Math.min(elapsed, t), total: t, index: seg.index });
-    if (elapsed >= t) stopPlayback();
+    if (cued) {
+      playback.cueAt = null;
+      playback.paused = elapsed;
+      ipcRenderer.send('anim:cue');
+    } else if (elapsed >= t) stopPlayback();
     else playback.raf = requestAnimationFrame(tick);
   };
+  playback.tick = tick;
   tick(playback.start);
 }
 
-ipcRenderer.on('anim:play', (_e, stops) => play(stops));
+// The cursor path has played: carry on from wherever it left the page, so the
+// rest of the line's hold and the next move start there instead of jumping back.
+function resumePlayback() {
+  if (!playback || playback.paused == null) return;
+  const el = root();
+  const elapsed = playback.paused;
+  const y = el.scrollTop;
+  const i = playback.segments.findIndex((s) => elapsed < s.end || s.end === elapsed);
+  for (const s of playback.segments.slice(Math.max(0, i))) {
+    if (s.start < elapsed || s.from === s.to) {
+      s.from = s.to = y; // the rest of the hold
+      continue;
+    }
+    s.from = y; // the next move
+    break;
+  }
+  playback.paused = null;
+  playback.start = performance.now() - elapsed;
+  playback.raf = requestAnimationFrame(playback.tick);
+}
+
+ipcRenderer.on('anim:play', (_e, stops, cue) => play(stops, cue));
+ipcRenderer.on('anim:resume', resumePlayback);
 ipcRenderer.on('anim:stop', stopPlayback);
 // Selecting a marker in the animation panel glides the page to it.
 ipcRenderer.on('anim:seek', (_e, y) => {
@@ -309,6 +341,14 @@ ipcRenderer.on('anim:seek', (_e, y) => {
     lastFrame = performance.now();
     rafId = requestAnimationFrame(frame);
   }
+});
+// A cursor path sets the scroll position outright, every frame it plays and
+// wherever it's scrubbed to.
+ipcRenderer.on('path:scroll', (_e, y) => {
+  if (playback && playback.paused == null) stopPlayback(); // not one waiting on the path
+  const el = root();
+  animations.delete(el);
+  el.scrollTo({ top: y, behavior: 'instant' });
 });
 ipcRenderer.on('anim:get-scroll', () => {
   const el = root();
@@ -324,7 +364,7 @@ let motionRaf = 0;
 let motionLast = null;
 let motionMoving = false;
 function motionFrame(now) {
-  if (!motion && !live.on) {
+  if (!motion && !live.on && !pathActive) {
     motionRaf = 0;
     return;
   }
@@ -349,6 +389,15 @@ function motionFrame(now) {
   pointerFrame();
   motionRaf = requestAnimationFrame(motionFrame);
 }
+// While a cursor path plays or is edited, the pointer goes out too, so the
+// path view draws the page's own cursor shape.
+let pathActive = false;
+ipcRenderer.on('path:active', (_e, on) => {
+  pathActive = !!on;
+  pointerSent = '';
+  if (pathActive && !motionRaf) motionRaf = requestAnimationFrame(motionFrame);
+});
+
 ipcRenderer.on('rec:motion', (_e, on) => {
   motion = !!on;
   motionLast = null;
@@ -588,3 +637,31 @@ window.addEventListener('keydown', (e) => {
   e.stopImmediatePropagation();
   ipcRenderer.send('cursor:nudge', e.key === ']' ? 1 : -1);
 }, true);
+
+// ---- Cursor path capture -------------------------------------------------------
+// ⇧⌘E: every frame, where the pointer is (null while it's off the page) and
+// how far the page is scrolled, plus each button press, on to the main
+// process. It fits them into a path once capture stops, or the page changes.
+let capture = null; // { t0, raf }
+const BUTTON_NAMES = ['left', 'middle', 'right'];
+
+function captureFrame(now) {
+  if (!capture) return;
+  const el = root();
+  const p = pointer && pointer.inside ? pointer : null;
+  ipcRenderer.send('path:sample', [Math.round((now - capture.t0) * 10) / 10, p ? p.x : null, p ? p.y : null, Math.round(el.scrollTop * 10) / 10]);
+  capture.raf = requestAnimationFrame(captureFrame);
+}
+
+ipcRenderer.on('path:capture', (_e, on) => {
+  if (capture) cancelAnimationFrame(capture.raf);
+  capture = on ? { t0: performance.now(), raf: 0 } : null;
+  if (capture) captureFrame(capture.t0);
+});
+
+for (const [type, kind] of [['mousedown', 'down'], ['mouseup', 'up']]) {
+  window.addEventListener(type, (e) => {
+    if (!capture || !e.isTrusted) return;
+    ipcRenderer.send('path:click', { t: Math.round((performance.now() - capture.t0) * 10) / 10, type: kind, x: e.clientX, y: e.clientY, button: BUTTON_NAMES[e.button] || 'left', count: e.detail || 1 });
+  }, { capture: true, passive: true });
+}

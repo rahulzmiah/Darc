@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { readMp4Index } = require('./mp4-index');
+const CursorPath = require('./cursor-path');
 
 const DEFAULTS = {
   mouseSpeed: 1,
@@ -40,7 +41,7 @@ if (!fs.existsSync(storePath) && fs.existsSync(legacyStorePath)) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
   fs.copyFileSync(legacyStorePath, storePath);
 }
-let store = { settings: { ...DEFAULTS }, cursor: { ...CURSOR_DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorWidth: 680, reloadOnRecord: true, playOnRecord: false, recordHeight: 'native', motionBlur: 0 };
+let store = { settings: { ...DEFAULTS }, cursor: { ...CURSOR_DEFAULTS }, lastUrl: '', bounds: null, animations: {}, paths: {}, animatorWidth: 680, reloadOnRecord: true, playOnRecord: false, recordHeight: 'native', motionBlur: 0 };
 try {
   const saved = JSON.parse(fs.readFileSync(storePath, 'utf8'));
   store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings }, cursor: { ...CURSOR_DEFAULTS, ...saved.cursor } };
@@ -62,7 +63,7 @@ function save() {
   saveTimer = setTimeout(() => fs.writeFileSync(storePath, JSON.stringify(store, null, 2)), 300);
 }
 
-let win, page, overlay, toast, animator, recorder, liveCursor;
+let win, page, overlay, toast, animator, recorder, liveCursor, pathView;
 let toastTimer;
 
 // Recording window, docked under the main window like the animation panel
@@ -100,6 +101,7 @@ function layout() {
   const [width, height] = win.getContentSize();
   page.setBounds({ x: 0, y: 0, width, height });
   liveCursor.setBounds({ x: 0, y: 0, width, height });
+  pathView.setBounds({ x: 0, y: 0, width, height });
   overlay.setBounds({ x: 0, y: 0, width, height });
   const tw = 340;
   const th = 52;
@@ -288,6 +290,7 @@ async function applyScrollbarCss() {
 
 function showOverlay(mode) {
   if (overlayMode === mode) return hideOverlay();
+  if (pathMode) closePathView();
   overlayMode = mode;
   syncLiveCursor();
   const url = page.webContents.getURL();
@@ -415,7 +418,9 @@ function cursorsChanged() {
 // pointer, so recordings just take the edge off frame timing.
 function recorderCursorPayload() {
   const payload = cursorPayload();
-  return liveCursorState().on ? { ...payload, smoothing: LIVE_RECORD_SMOOTHING, damping: 1 } : payload;
+  // A cursor path is already smooth, and its clicks land where it is.
+  const smooth = liveCursorState().on || !!pathFor(animationKey());
+  return smooth ? { ...payload, smoothing: LIVE_RECORD_SMOOTHING, damping: 1 } : payload;
 }
 
 function syncCursor() {
@@ -427,6 +432,7 @@ function syncCursorSpans() {
   const spans = trackFor(animationKey()).cursor;
   sendToRecorder('rec:cursor-spans', spans);
   sendToLiveCursor('live:cursor-spans', spans);
+  sendToRecorder('rec:cursor', recorderCursorPayload());
 }
 
 // ---- Live cursor -------------------------------------------------------------
@@ -441,7 +447,7 @@ const liveCursorOpen = () => !!liveCursor && !liveCursor.webContents.isDestroyed
 
 function liveCursorState() {
   const keys = !!store.cursor.live;
-  return { keys, on: keys && store.cursor.smoothing > 0 && !overlayMode };
+  return { keys, on: keys && store.cursor.smoothing > 0 && !overlayMode && !pathMode };
 }
 
 function sendToLiveCursor(channel, data) {
@@ -946,11 +952,17 @@ function playAnimation() {
     return;
   }
   const { stops } = trackFor(animationKey());
+  // A cursor path plays straight away, or once the scroll animation reaches its line.
+  const cursorPath = pathFor(animationKey());
+  const cue = cursorPath && cursorPath.startAfter != null && cursorPath.startAfter < stops.length ? cursorPath.startAfter : null;
+  if (cursorPath && cue == null) return openPathView('play');
   if (!stops.length) return showToast('No animation for this page · ⌘.');
+  if (pathMode) closePathView();
   hideOverlay();
   win.focus();
   page.webContents.focus();
-  page.webContents.send('anim:play', stops);
+  pathCued = false;
+  page.webContents.send('anim:play', stops, cue);
 }
 
 function buildMenu() {
@@ -1002,7 +1014,11 @@ function buildMenu() {
         { label: 'Set Marker', accelerator: 'CmdOrCtrl+K', click: setMarker },
         { type: 'separator' },
         { label: 'Play', accelerator: 'CmdOrCtrl+Enter', click: playAnimation },
-        { label: 'Stop', accelerator: 'Shift+CmdOrCtrl+.', click: () => page.webContents.send('anim:stop') },
+        { label: 'Stop', accelerator: 'Shift+CmdOrCtrl+.', click: stopAnimation },
+        { type: 'separator' },
+        { label: 'Capture Cursor Path / Stop', accelerator: 'Shift+CmdOrCtrl+E', click: togglePathCapture },
+        { label: 'Edit Cursor Path', accelerator: 'CmdOrCtrl+P', click: editPath },
+        { label: 'Delete Cursor Path', click: () => deletePath(animationKey()) },
       ],
     },
     {
@@ -1090,8 +1106,10 @@ function createWindow() {
   toast.webContents.loadFile(path.join(__dirname, 'toast.html'));
 
   createLiveCursor();
+  createPathView();
   win.contentView.addChildView(page);
   win.contentView.addChildView(liveCursor); // under the overlay and toast
+  win.contentView.addChildView(pathView);
   win.contentView.addChildView(overlay);
   win.contentView.addChildView(toast);
   layout();
@@ -1145,6 +1163,7 @@ function createWindow() {
   });
   wc.on('dom-ready', () => {
     if (recordingActive) wc.send('rec:motion', true); // a reload mid-recording restarts the preload
+    if (pathMode) wc.send('path:active', true);
     scrollbarCssKey = null;
     applyScrollbarCss();
     // No keyboard focus rings on recorded pages.
@@ -1187,7 +1206,10 @@ function createWindow() {
   // Leaving the page ends its animation; the page can't say so itself.
   wc.on('did-start-navigation', (e) => {
     if (e.isMainFrame && !e.isSameDocument && animPlaying) animProgress({ playing: false });
+    if (e.isMainFrame && !e.isSameDocument) pathPageChanging();
   });
+  wc.on('did-navigate-in-page', (_e, _url, isMainFrame) => isMainFrame && pathPageChanged());
+  wc.on('did-finish-load', pathPageLoaded);
   wc.on('did-finish-load', () => sendToAnimator('anim:page-changed'));
   wc.on('did-navigate-in-page', () => sendToAnimator('anim:page-changed'));
   wc.on('did-finish-load', invalidatePreview);
@@ -1275,7 +1297,7 @@ ipcMain.on('cursor:set-entry', (_e, id, partial) => {
 
 ipcMain.on('anim:play', playAnimation);
 ipcMain.on('anim:close', () => animator && animator.close());
-ipcMain.on('anim:stop', () => page.webContents.send('anim:stop'));
+ipcMain.on('anim:stop', stopAnimation);
 ipcMain.on('anim:seek', (_e, y) => page.webContents.send('anim:seek', y));
 // The recording's reload has finished loading: play the animation if it was
 // asked for meanwhile, or if recordings start it.
@@ -1298,6 +1320,236 @@ function animProgress(data) {
     sendToRecorder('rec:event', { type: animPlaying ? 'anim-start' : 'anim-end', label: animPlaying ? 'Animation' : '' });
   }
 }
+
+// ---- Cursor paths ------------------------------------------------------------
+// ⇧⌘E captures the mouse over the page as a path (cursor-path.js), saved per
+// page like scroll animations. ⌘P edits it in a view laid over the page, and
+// playing the page's animation plays its path instead, scroll and all.
+// Capturing stops when the page changes, so each page has its own path; a
+// played path whose last click leads to another page carries on into that
+// page's path once it loads.
+let pathMode = null; // 'edit' | 'play' while the path view is up
+let pathCapture = null; // { key, viewport, samples, clicks, ending }
+let pathPlaying = false;
+let pathPlayKey = null; // page whose path is playing
+let pathEnded = 0; // when a played path last finished, to carry on after a click that navigates
+let pathChainPending = false;
+let pathCued = false; // the path playing was started by the scroll animation reaching its line
+const PATH_CHAIN_WINDOW = 2000; // ms after a path ends that a navigation still carries on
+const PATH_CAPTURE_TAIL = 150; // ms to wait for the last click after the page starts to change
+
+const pathFor = (key) => (key && store.paths[key]) || null;
+const pathViewOpen = () => !!pathView && !pathView.webContents.isDestroyed();
+
+function sendToPathView(channel, data) {
+  if (pathViewOpen()) pathView.webContents.send(channel, data);
+}
+
+function createPathView() {
+  pathView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'path-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+  pathView.setBackgroundColor('#00000000');
+  pathView.setVisible(false);
+  pathView.webContents.loadFile(path.join(__dirname, 'path.html'));
+}
+
+function viewportSize() {
+  const { width, height } = page.getBounds();
+  return { width, height };
+}
+
+function togglePathCapture() {
+  if (pathCapture) {
+    if (!pathCapture.ending) finishPathCapture(false);
+  } else startPathCapture();
+}
+
+function startPathCapture() {
+  const key = animationKey();
+  if (!key) return showToast('Open a page first · ⌘L');
+  if (pathMode) closePathView();
+  if (overlayMode) hideOverlay();
+  pathCapture = { key, viewport: viewportSize(), samples: [], clicks: [], ending: false };
+  page.webContents.send('path:capture', true);
+  win.focus();
+  page.webContents.focus();
+  showToast('Capturing cursor path · ⇧⌘E to stop');
+}
+
+// Fits what was captured into the page's path. `navigated`: the page changed.
+function finishPathCapture(navigated) {
+  const cap = pathCapture;
+  if (!cap) return;
+  pathCapture = null;
+  page.webContents.send('path:capture', false);
+  const fitted = CursorPath.fit(cap);
+  const clicks = fitted ? fitted.anchors.filter((a) => a.buttons.some((b) => b.type === 'down')).length : 0;
+  if (!fitted || (fitted.anchors.length < 2 && !clicks)) return showToast('No cursor movement captured');
+  store.paths[cap.key] = fitted;
+  save();
+  sendToRecorder('rec:cursor', recorderCursorPayload());
+  const what = `${(fitted.duration / 1000).toFixed(1)} s${clicks ? ` · ${clicks} click${clicks === 1 ? '' : 's'}` : ''}`;
+  showToast(navigated ? `Page changed · path saved · ${what}` : `Cursor path saved · ${what} · ⌘P to edit`);
+}
+
+async function openPathView(mode) {
+  const key = animationKey();
+  const saved = pathFor(key);
+  if (!saved) return showToast('No cursor path for this page · ⇧⌘E');
+  // Where the page is now: a path starting elsewhere glides there first.
+  const from = mode === 'play' ? await pageScrollY() : null;
+  if (key !== animationKey()) return;
+  if (pathCapture) finishPathCapture(false);
+  if (overlayMode) hideOverlay();
+  if (!pathCued) page.webContents.send('anim:stop');
+  pathMode = mode;
+  if (mode === 'play') pathPlayKey = key;
+  syncLiveCursor();
+  page.webContents.send('path:active', true);
+  pathView.setVisible(true);
+  win.focus();
+  pathView.webContents.focus();
+  const now = viewportSize();
+  const v = saved.viewport;
+  if (v && (v.width !== now.width || v.height !== now.height)) showToast(`Path captured at ${v.width} × ${v.height} · now ${now.width} × ${now.height}`);
+  const lines = trackFor(key).stops.map((s) => s.y);
+  const send = () => sendToPathView('path:open', { mode, key, path: saved, from, lines, cursor: { ...cursorPayload(), smoothing: 0 } });
+  if (pathView.webContents.isLoading()) pathView.webContents.once('did-finish-load', send);
+  else send();
+}
+
+function editPath() {
+  if (pathMode === 'edit') closePathView();
+  else {
+    stopAnimation();
+    openPathView('edit');
+  }
+}
+
+function closePathView() {
+  if (!pathMode) return;
+  sendToPathView('path:stop');
+  pathMode = null;
+  pathView.setVisible(false);
+  page.webContents.send('path:active', false);
+  syncLiveCursor();
+  win.focus();
+  page.webContents.focus();
+}
+
+function deletePath(key) {
+  if (!pathFor(key)) return showToast('No cursor path for this page');
+  delete store.paths[key];
+  save();
+  if (key === animationKey()) closePathView();
+  sendToRecorder('rec:cursor', recorderCursorPayload());
+  showToast('Cursor path deleted');
+}
+
+// Stops whatever is playing: the scroll animation or a cursor path.
+function stopAnimation() {
+  page.webContents.send('anim:stop');
+  if (pathMode) sendToPathView('path:stop');
+}
+
+function pathProgress(data) {
+  const anim = { playing: !!data.playing, elapsed: data.elapsed || 0 };
+  if (pathCued) {
+    // Part of the scroll animation, which waits for it and carries on after.
+    if (anim.playing) return;
+    pathCued = false;
+    if (data.finished && pathMode === 'play') pathEnded = Date.now();
+    page.webContents.send(data.finished ? 'anim:resume' : 'anim:stop');
+    return;
+  }
+  // The recorder times cursor spans off it, like the scroll animation.
+  sendToRecorder('rec:anim-progress', anim);
+  if (anim.playing === pathPlaying) return;
+  pathPlaying = anim.playing;
+  sendToRecorder('rec:event', { type: pathPlaying ? 'anim-start' : 'anim-end', label: pathPlaying ? 'Path' : '' });
+  if (!pathPlaying && data.finished && pathMode === 'play') pathEnded = Date.now();
+}
+
+const pathJustEnded = () => Date.now() - pathEnded < PATH_CHAIN_WINDOW;
+
+function endCaptureForNavigation() {
+  if (!pathCapture || pathCapture.ending) return;
+  pathCapture.ending = true;
+  setTimeout(() => finishPathCapture(true), PATH_CAPTURE_TAIL);
+}
+
+// The page is being replaced: capturing stops, and a path that just clicked
+// its way off the page carries on into the next page's.
+function pathPageChanging() {
+  endCaptureForNavigation();
+  pathCued = false; // the animation waiting on it goes with the page
+  if (pathMode === 'play') {
+    pathChainPending = !recordReload;
+    sendToPathView('path:stop');
+  } else if (pathJustEnded() && !recordReload) {
+    pathChainPending = true;
+  }
+  if (pathMode === 'edit') closePathView();
+}
+
+function playChainedPath(delay) {
+  setTimeout(() => {
+    if (!pathMode && !pathCapture && pathFor(animationKey())) openPathView('play');
+  }, delay);
+}
+
+function pathPageLoaded() {
+  if (!pathChainPending) return;
+  pathChainPending = false;
+  pathEnded = 0;
+  playChainedPath(PLAY_AFTER_LOAD);
+}
+
+// Same-document navigations (single-page apps) change the page too.
+function pathPageChanged() {
+  if (pathCapture && animationKey() !== pathCapture.key) endCaptureForNavigation();
+  if (animationKey() === pathPlayKey) return;
+  if (pathMode === 'play' || pathJustEnded()) {
+    if (pathMode === 'play') sendToPathView('path:stop');
+    pathEnded = 0;
+    playChainedPath(600);
+  }
+  if (pathMode === 'edit') closePathView();
+}
+
+// The scroll animation reached the path's line and is waiting for it.
+ipcMain.on('anim:cue', (e) => {
+  if (e.sender !== page.webContents) return;
+  pathCued = true;
+  openPathView('play');
+});
+
+ipcMain.on('path:sample', (e, s) => {
+  if (pathCapture && !pathCapture.ending && e.sender === page.webContents) pathCapture.samples.push(s);
+});
+ipcMain.on('path:click', (e, c) => {
+  if (pathCapture && e.sender === page.webContents) pathCapture.clicks.push(c);
+});
+ipcMain.on('path:input', (e, ev) => {
+  if (pathMode && e.sender === pathView.webContents) page.webContents.sendInputEvent(ev);
+});
+ipcMain.on('path:scroll', (e, y) => {
+  if (pathMode && e.sender === pathView.webContents) page.webContents.send('path:scroll', y);
+});
+ipcMain.on('path:progress', (e, data) => e.sender === pathView.webContents && pathProgress(data));
+ipcMain.on('path:set', (e, key, saved) => {
+  if (e.sender !== pathView.webContents || !key || !saved) return;
+  store.paths[key] = saved;
+  save();
+});
+ipcMain.on('path:delete', (e, key) => e.sender === pathView.webContents && deletePath(key));
+ipcMain.on('path:close', (e) => e.sender === pathView.webContents && closePathView());
 
 // ---- Recording -------------------------------------------------------------
 // The pane captures the page's WebContents (tab capture, so nothing but the
@@ -1327,11 +1579,13 @@ ipcMain.on('rec:pointer', (e, p) => {
   if (e.sender !== page.webContents) return;
   sendToRecorder('rec:pointer', p);
   sendToLiveCursor('live:pointer', p);
+  sendToPathView('path:pointer', p);
 });
 ipcMain.on('rec:cursor-image', (e, img) => {
   if (e.sender !== page.webContents) return;
   sendToRecorder('rec:cursor-image', img);
   sendToLiveCursor('live:cursor-image', img);
+  sendToPathView('path:cursor-image', img);
 });
 ipcMain.on('rec:set-play', (_e, on) => {
   store.playOnRecord = !!on;

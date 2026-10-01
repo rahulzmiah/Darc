@@ -30,8 +30,10 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 | ⌘. | Animation panel |
 | ⌘E | Record / stop recording |
 | ⌥⌘E | Recording window |
-| ⌘↩ | Play the page's scroll animation (Esc or scrolling stops it) |
+| ⌘↩ | Play the page's cursor path, or its scroll animation (Esc or scrolling stops it) |
 | ⌘K | Set a marker at the current scroll position |
+| ⇧⌘E | Capture a cursor path / stop capturing |
+| ⌘P | Edit the page's cursor path |
 | [ / ] | Less / more cursor smoothing (with Live cursor on) |
 | Esc | Close the overlay |
 | ⌘R / ⇧⌘R | Reload / hard reload |
@@ -67,6 +69,22 @@ Mouse wheel and trackpad have separate speed multipliers. Pages that already use
 - ⌘Z undoes any edit (new lines, moves, reorders, deletions, timing, easing and cursor spans); ⇧⌘Z redoes.
 
 Animations are saved per page (origin + path).
+
+## Cursor paths
+
+A cursor path is a mouse movement you perform once, tidy up, and then replay exactly while recording.
+
+- **⇧⌘E** starts capturing. Move, scroll and click through the page, then press ⇧⌘E again. Capturing also stops by itself when the page changes (a link, a reload, or a single-page app changing its path), so each page gets its own path. The click that leaves the page is kept as the path's last point.
+- The path is fitted into Bézier curves with a few anchor points, like a pen-tool path. It sits in the viewport, the fixed box the recording sees. Scrolling is a separate track on the same clock, so editing the path never changes the scroll.
+- **⌘P** opens the path over the page. Clicking or dragging along the path (or the timeline at the bottom, or the scroll wheel) scrubs it, and the page scrolls to where it was at that moment, with the pointer hovering where it was.
+  - Drag an anchor to move it, or drag its handles to bend the curve. The opposite handle stays in line unless you hold ⌥. ⌥-drag an anchor to pull out new handles.
+  - Double-click the path to add an anchor. ⌫ removes the selected one. Tab steps through the anchors.
+  - Numbered red rings are clicks. **Click** (or C) adds or removes a click at the selected anchor.
+  - **Pause** adds a wait at the selected anchor, and the scroll waits too. **Move** sets how long the move to the next anchor takes. The ease can stay **As recorded**, or be set to ease in-out, ease out or linear.
+  - Space previews from the playhead. ⌘Z / ⇧⌘Z undo and redo. **Delete** (pressed twice) removes the path. Esc or **Done** closes the editor.
+- **Starts** sets when the path plays. With **Right away**, it plays as soon as play is pressed. With **At line N**, the page's scroll animation (⌘.) plays first, and when its move to that line ends, it waits while the path plays. Then it carries on from wherever the path left the page: the rest of the line's hold, then the next move. Use this for a path deep in the page: let a line bring the page there, then the path takes over. If the page isn't where the path begins when it starts, it glides there first instead of jumping.
+- A page with a path plays it with its scroll animation as above, instead of the animation alone: ⌘↩, space, ▶ Animation, and **Play animation** when recording starts. While a path plays, the page gets its pointer, clicks and scroll, and the real mouse is kept out. If the path's last click leads to another page that has a path, that page's path plays once it loads, so one recording can click through a whole flow.
+- Paths are saved per page (origin + path), along with the viewport size they were captured at. You'll get a warning if the window is a different size now.
 
 ## Cursor
 

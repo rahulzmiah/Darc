@@ -89,6 +89,7 @@ Tab capture has no pointer in it, so Darc draws one into the footage from where 
 - **Reload page** (on by default) reloads from the top as recording starts, so the page's load animations play again on camera.
 - Recording keeps going while you scroll, follow links and navigate. The timeline marks reloads, navigations, page loads and scroll-animation playback.
 - **▶ Animation** plays the page's scroll animation from the recording window; the ● Rec button in the animation panel starts a recording.
+- **Discard** throws a take away: while recording it stops without keeping anything, and while saving it cancels the save and deletes the file.
 - Closing the browser mid-recording finishes writing the file first.
 
 `DARC_SMOKE=<url> npm start` records the page for a few seconds and prints the result, for checking the pipeline.

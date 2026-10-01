@@ -54,6 +54,8 @@
   .spacer { flex: 1; min-width: 0; }
   #reveal { display: none; }
   body.saved #reveal { display: block; }
+  #discard { display: none; }
+  body.recording #discard, body.stopping #discard { display: block; }
   #close { color: #555; font-size: 18px; line-height: 1; padding: 0 4px; }
   #close:hover { color: #fff; }
   #close:disabled { opacity: 0.3; }
@@ -77,6 +79,7 @@
   <span class="time" id="time">0:00.0</span>
   <span class="stats" id="stats">Press Record to capture the page · reload plays its load animations again</span>
   <span class="spacer"></span>
+  <button class="btn" id="discard" title="Stop without keeping the recording, or stop saving it">Discard</button>
   <button class="btn" id="anim" title="Play the page's scroll animation (⌘↩)">▶ Animation</button>
   <button class="btn" id="reveal" title="Show the recording in Finder">Reveal</button>
   <button id="close" title="Close (⌥⌘E)">×</button>
@@ -158,6 +161,7 @@
     document.body.classList.toggle('recording', s === 'recording');
     document.body.classList.toggle('busy', s === 'starting' || s === 'stopping');
     document.body.classList.toggle('saved', s === 'saved');
+    document.body.classList.toggle('stopping', s === 'stopping');
     $('record').querySelector('.label').textContent = s === 'recording' ? 'Stop' : s === 'stopping' ? 'Saving…' : s === 'starting' ? 'Starting…' : 'Record';
     $('close').disabled = s === 'recording' || s === 'stopping' || s === 'starting';
     $('res').disabled = $('blur').disabled = $('reload').disabled = s !== 'idle' && s !== 'saved';
@@ -457,6 +461,7 @@
       this.bytes = 0;
       this.error = null;
       this.stopping = null;
+      this.aborted = false; // discarded: nothing is kept
       this.started = performance.now();
       this.timer = setInterval(() => this.tick(), 4);
       this.reader = new MediaStreamTrackProcessor({ track: this.track }).readable.getReader();
@@ -625,8 +630,18 @@
       stop();
     }
 
+    // Throws the recording away, even partway through saving it.
+    discard() {
+      this.aborted = true;
+      try {
+        if (this.encoder && this.encoder.state !== 'closed') this.encoder.close(); // ends a pending flush
+      } catch {}
+      return this.stop();
+    }
+
     // Stops capture, drains the encoder and writes the MP4 index. Resolves
-    // with the saved file's stats, or null if nothing usable was captured.
+    // with the saved file's stats, or null if nothing usable was captured or
+    // it was discarded.
     stop() {
       if (this.stopping) return this.stopping;
       this.stopping = (async () => {
@@ -641,23 +656,30 @@
           this.latest = null;
         }
         let ok = false;
-        if (this.encoder && this.encoded && !this.error) {
+        if (this.encoder && this.encoded && !this.error && !this.aborted) {
           try {
             await this.encoder.flush();
-            this.muxer.finalize();
-            ok = true;
+            if (!this.aborted) {
+              this.muxer.finalize();
+              ok = true;
+            }
           } catch (err) {
-            this.error = err;
+            if (!this.aborted) this.error = err;
           }
         }
         try {
           if (this.encoder && this.encoder.state !== 'closed') this.encoder.close();
         } catch {}
         if (!ok) {
-          await narc.cancel();
+          await narc.cancel(this.aborted);
           return null;
         }
         const saved = await narc.finish({ seconds, bytes: this.bytes, frames: this.encoded, dropped: this.dropped });
+        if (this.aborted) {
+          // Discarded while the file was being closed: delete it after all.
+          await narc.discard(saved.path);
+          return null;
+        }
         return { ...saved, seconds, bytes: this.bytes, frames: this.encoded, dropped: this.dropped, width: this.plan.width, height: this.plan.height };
       })();
       return this.stopping;
@@ -715,9 +737,11 @@
     refresh();
   }
 
-  async function stop() {
-    if (!session || state !== 'recording') return;
+  async function stop(discard) {
+    if (!session || (state !== 'recording' && !(discard && state === 'stopping'))) return;
     const s = session;
+    if (discard) s.discard();
+    if (state === 'stopping') return; // the stop already underway finishes up
     setState('stopping');
     const saved = await s.stop();
     session = null;
@@ -726,7 +750,8 @@
       setState('saved');
     } else {
       setState('idle');
-      status(s.error ? `Recording failed: ${s.error.message || s.error}` : 'Nothing was captured', true);
+      if (s.aborted) status('Recording discarded');
+      else status(s.error ? `Recording failed: ${s.error.message || s.error}` : 'Nothing was captured', true);
     }
     draw();
     renderStats();
@@ -739,6 +764,7 @@
 
   $('record').addEventListener('click', toggle);
   $('reveal').addEventListener('click', () => narc.reveal());
+  $('discard').addEventListener('click', () => stop(true));
   $('close').addEventListener('click', () => narc.close());
   $('anim').addEventListener('click', () => (animPlaying ? narc.stopAnimation() : narc.playAnimation()));
   $('reload').addEventListener('change', () => {

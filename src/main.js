@@ -1116,7 +1116,17 @@ ipcMain.handle('rec:finish', (_e, stats) => {
   return rec ? { path: rec.path, name: rec.name } : { error: 'No file open' };
 });
 
-ipcMain.handle('rec:cancel', () => {
+// The pane discarded a recording just after it was saved.
+ipcMain.handle('rec:discard', (_e, file) => {
+  if (!file || file !== lastRecording) return false;
+  fs.rmSync(file, { force: true });
+  lastRecording = null;
+  showToast('Recording discarded');
+  return true;
+});
+
+ipcMain.handle('rec:cancel', (_e, discarded) => {
+  if (discarded && recording) showToast('Recording discarded');
   finishRecording(false);
   if (process.env.DARC_SMOKE) console.log(JSON.stringify({ saved: null }));
   afterRecording();

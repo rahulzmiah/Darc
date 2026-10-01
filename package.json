@@ -1,7 +1,7 @@
 {
   "name": "darc",
   "productName": "Darc",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A chrome-less Chromium browser for recording buttery-smooth website footage.",
   "main": "src/main.js",
   "private": true,

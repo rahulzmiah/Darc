@@ -1,6 +1,7 @@
 const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen, shell, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { readMp4Index } = require('./mp4-index');
 
@@ -22,8 +23,8 @@ const CURSOR_DEFAULTS = {
   size: 22, // height in CSS px for the built-in shapes and custom images
   smoothing: 120, // ms for the drawn pointer to settle on the real one, 0 = none
   damping: 1, // spring damping ratio: below 1 overshoots, above 1 trails
-  hotspot: 'tip', // where a custom image points from: 'tip' (top left) | 'center'
-  custom: null, // { name, path } of an uploaded image
+  library: [], // custom cursors, uploaded or taken from pages (see cursorEntry)
+  selected: null, // id of the library cursor drawn in 'custom' mode
   live: false, // also smooth the pointer on screen, not just in recordings
 };
 
@@ -44,6 +45,16 @@ try {
   const saved = JSON.parse(fs.readFileSync(storePath, 'utf8'));
   store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings }, cursor: { ...CURSOR_DEFAULTS, ...saved.cursor } };
 } catch {}
+
+// Before the library there was one uploaded image, with the hotspot set for it.
+if (store.cursor.custom) {
+  const { custom, hotspot, ...rest } = store.cursor;
+  store.cursor = rest;
+  if (custom.path && fs.existsSync(custom.path) && !store.cursor.library.length) {
+    store.cursor.library = [{ id: 'legacy', name: custom.name, file: custom.path, hotspot: hotspot || 'tip' }];
+    store.cursor.selected = 'legacy';
+  }
+}
 
 let saveTimer;
 function save() {
@@ -345,20 +356,59 @@ function sendToAnimator(channel, data) {
 }
 
 // ---- Cursor overlay settings -------------------------------------------------
-const IMAGE_MIME = { '.png': 'image/png', '.svg': 'image/svg+xml', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+const IMAGE_MIME = { '.png': 'image/png', '.svg': 'image/svg+xml', '.gif': 'image/gif', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.cur': 'image/x-icon', '.ico': 'image/x-icon' };
+const MIME_EXT = { 'image/png': '.png', 'image/svg+xml': '.svg', 'image/gif': '.gif', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/x-icon': '.cur', 'image/vnd.microsoft.icon': '.cur' };
+const cursorsDir = () => path.join(app.getPath('userData'), 'cursors');
 
-// Settings as the recorder and the panel's demo need them: with the custom
-// image inlined, since neither can read files.
-function cursorPayload() {
-  const c = store.cursor;
-  let image = null;
-  if (c.custom && c.custom.path) {
-    try {
-      const mime = IMAGE_MIME[path.extname(c.custom.path).toLowerCase()] || 'image/png';
-      image = `data:${mime};base64,${fs.readFileSync(c.custom.path).toString('base64')}`;
-    } catch {}
+// A library entry: { id, name, file, hotspot, hx, hy, native, source }.
+// hotspot is 'tip' (top left), 'center', or 'page' for the (hx, hy) a page's
+// CSS gave it, in the image's own px. Cursors taken from a page are `native`:
+// drawn at their own size, scaled with the size setting like the built-in
+// shapes, rather than squeezed to `size` tall.
+function cursorEntry(id) {
+  return store.cursor.library.find((e) => e.id === id) || null;
+}
+
+function imageData(file) {
+  try {
+    const mime = IMAGE_MIME[path.extname(file).toLowerCase()] || 'image/png';
+    return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`;
+  } catch {
+    return null;
   }
-  return { ...c, image };
+}
+
+// Settings as the recorder and the panel's demo need them: with the selected
+// custom image inlined, since neither can read files.
+function cursorPayload() {
+  const { library, ...c } = store.cursor;
+  const entry = cursorEntry(c.selected);
+  if (!entry) return { ...c, image: null };
+  return { ...c, image: imageData(entry.file), name: entry.name, hotspot: entry.hotspot, hx: entry.hx || 0, hy: entry.hy || 0, native: !!entry.native };
+}
+
+// Every custom cursor, with its image, for the panel and the editor to pick from.
+function cursorLibrary() {
+  return store.cursor.library.map((e) => ({ ...e, image: imageData(e.file) }));
+}
+
+// Files them by content, so adding the same image again just selects it.
+function addCursor(buf, ext, meta) {
+  const id = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12);
+  if (!cursorEntry(id)) {
+    fs.mkdirSync(cursorsDir(), { recursive: true });
+    const file = path.join(cursorsDir(), `${id}${ext}`);
+    fs.writeFileSync(file, buf);
+    store.cursor.library = [...store.cursor.library, { id, file, ...meta }];
+  }
+  return id;
+}
+
+function cursorsChanged() {
+  save();
+  syncCursor();
+  sendToAnimator('anim:cursor', cursorPayload());
+  sendToAnimator('anim:cursor-library', cursorLibrary());
 }
 
 // With the live cursor on, the page only ever sees the already-smoothed
@@ -442,21 +492,171 @@ function nudgeSmoothing(dir) {
   showToast(next ? `Cursor smoothing · ${next} ms` : 'Cursor smoothing off');
 }
 
-// Copies the chosen image into the app's data folder so it outlives the original.
+// Copies the chosen images into the app's data folder so they outlive the
+// originals, and selects the last.
 async function pickCursorImage() {
   const { canceled, filePaths } = await dialog.showOpenDialog(animator && !animator.isDestroyed() ? animator : win, {
-    title: 'Choose a cursor image',
-    filters: [{ name: 'Images', extensions: ['png', 'svg', 'gif', 'jpg', 'jpeg', 'webp'] }],
-    properties: ['openFile'],
+    title: 'Choose cursor images',
+    filters: [{ name: 'Images', extensions: ['png', 'svg', 'gif', 'jpg', 'jpeg', 'webp', 'cur', 'ico'] }],
+    properties: ['openFile', 'multiSelections'],
   });
   if (canceled || !filePaths.length) return null;
-  const src = filePaths[0];
-  const dest = path.join(app.getPath('userData'), `cursor${path.extname(src).toLowerCase()}`);
-  fs.copyFileSync(src, dest);
-  store.cursor = { ...store.cursor, mode: 'custom', custom: { name: path.basename(src), path: dest } };
-  save();
-  syncCursor();
+  let id = null;
+  for (const src of filePaths) {
+    const ext = path.extname(src).toLowerCase();
+    const buf = fs.readFileSync(src);
+    const hot = ext === '.cur' ? curHotspot(buf) : null;
+    id = addCursor(buf, ext, hot ? { name: path.basename(src), hotspot: 'page', ...hot } : { name: path.basename(src), hotspot: 'tip' });
+  }
+  store.cursor = { ...store.cursor, mode: 'custom', selected: id };
+  cursorsChanged();
   return cursorPayload();
+}
+
+function removeCursor(id) {
+  const entry = cursorEntry(id);
+  if (!entry) return;
+  store.cursor.library = store.cursor.library.filter((e) => e !== entry);
+  if (path.dirname(entry.file) === cursorsDir()) fs.rm(entry.file, { force: true }, () => {});
+  if (store.cursor.selected === id) {
+    const next = store.cursor.library[store.cursor.library.length - 1];
+    store.cursor.selected = next ? next.id : null;
+    if (!next && store.cursor.mode === 'custom') store.cursor.mode = 'auto';
+  }
+  cursorsChanged();
+}
+
+// A .cur file carries its own hotspot (in the first image's px), used when
+// the CSS doesn't give one.
+function curHotspot(buf) {
+  if (buf.length < 22 || buf.readUInt16LE(0) !== 0 || buf.readUInt16LE(2) !== 2) return null;
+  return { hx: buf.readUInt16LE(10), hy: buf.readUInt16LE(12) };
+}
+
+// ---- Cursors from the page's CSS -------------------------------------------
+// Runs in the page: every `cursor` with an image in it, from the page's style
+// sheets, style attributes and the root's computed style. Sheets from other
+// origins can't be read here; their URLs come back for the main process to
+// fetch and search instead.
+const CURSOR_SCAN = `(() => {
+  const rules = [];
+  const sheets = [];
+  const walk = (list, base) => {
+    for (const r of list) {
+      if (r.styleSheet) sheet(r.styleSheet);
+      else if (r.style && r.style.cursor.includes('url(')) rules.push({ value: r.style.cursor, base, selector: r.selectorText || '' });
+      if (r.cssRules) walk(r.cssRules, base);
+    }
+  };
+  const sheet = (s) => {
+    const base = s.href || document.baseURI;
+    try { walk(s.cssRules, base); } catch { if (s.href) sheets.push(s.href); }
+  };
+  for (const s of [...document.styleSheets, ...(document.adoptedStyleSheets || [])]) sheet(s);
+  for (const el of document.querySelectorAll('[style*="cursor"]')) {
+    if (el.style.cursor.includes('url(')) rules.push({ value: el.style.cursor, base: document.baseURI, selector: el.tagName.toLowerCase() });
+  }
+  const roots = [document.documentElement, document.body].filter(Boolean).map((el) => getComputedStyle(el).cursor).filter((v) => v.includes('url('));
+  return { rules, sheets: sheets.slice(0, 20), roots, base: document.baseURI, host: location.hostname };
+})()`;
+
+const ROOT_SELECTOR = /(^|,)\s*(html|body|:root|\*)\s*(,|$)/i;
+const MAX_CURSOR_BYTES = 2 * 1024 * 1024;
+
+// The first image of a `cursor` value, with its hotspot if it has one, and
+// the keyword it falls back to.
+function parseCursorValue(value, base) {
+  const m = /url\(\s*(["']?)(.*?)\1\s*\)\s*(-?[\d.]+)?\s*(-?[\d.]+)?/.exec(value);
+  if (!m) return null;
+  let url;
+  try {
+    url = new URL(m[2], base).href;
+  } catch {
+    return null;
+  }
+  const keyword = value.replace(/url\([^)]*\)[^,]*,?/g, '').trim().split(/\s*,\s*/).pop() || 'auto';
+  return { url, hx: m[3] != null ? +m[3] : null, hy: m[4] != null ? +m[4] : null, keyword };
+}
+
+// `cursor` declarations in a style sheet's text, for sheets the page can't read.
+function cursorRulesInCss(css, base) {
+  const out = [];
+  const re = /([^{}]*)\{([^{}]*)\}/g;
+  let m;
+  css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  while ((m = re.exec(css))) {
+    const decl = /(?:^|;)\s*cursor\s*:\s*([^;]*url\([^;]*)/i.exec(m[2]);
+    if (decl) out.push({ value: decl[1], base, selector: m[1].trim() });
+  }
+  return out;
+}
+
+async function fetchCursorImage(ses, url) {
+  if (url.startsWith('data:')) {
+    const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
+    if (!m) return null;
+    const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]));
+    return { buf, mime: (m[1] || '').toLowerCase() };
+  }
+  const res = await ses.fetch(url);
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { buf, mime: (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() };
+}
+
+// Adds every image cursor the page's CSS sets to the library and selects its
+// main one: the cursor on the root, else on html/body/:root/*, else the first
+// that stands in for the arrow rather than a hover state like `pointer`.
+async function cursorsFromPage() {
+  let scan;
+  try {
+    scan = await page.webContents.executeJavaScript(CURSOR_SCAN, true);
+  } catch {
+    return { found: 0 };
+  }
+  const ses = page.webContents.session;
+  const rules = [...scan.rules];
+  await Promise.all(scan.sheets.map(async (href) => {
+    try {
+      const res = await ses.fetch(href);
+      if (res.ok) rules.push(...cursorRulesInCss(await res.text(), href));
+    } catch {}
+  }));
+  const found = new Map(); // url -> { url, hx, hy, keyword, rank }
+  const consider = (c, rank) => {
+    if (!c) return;
+    const had = found.get(c.url);
+    if (!had || rank < had.rank) found.set(c.url, { ...c, rank, hx: c.hx ?? had?.hx ?? null, hy: c.hy ?? had?.hy ?? null });
+  };
+  for (const v of scan.roots) consider(parseCursorValue(v, scan.base), 0);
+  for (const r of rules) {
+    const c = parseCursorValue(r.value, r.base);
+    if (!c) continue;
+    const arrowish = /^(auto|default)$/.test(c.keyword);
+    consider(c, ROOT_SELECTOR.test(r.selector) ? 1 : arrowish ? 2 : 3);
+  }
+  const ranked = [...found.values()].sort((a, b) => a.rank - b.rank).slice(0, 24);
+  let main = null;
+  let added = 0;
+  for (const c of ranked) {
+    try {
+      const img = await fetchCursorImage(ses, c.url);
+      if (!img || !img.buf.length || img.buf.length > MAX_CURSOR_BYTES) continue;
+      const urlExt = path.extname(new URL(c.url).pathname).toLowerCase();
+      const ext = MIME_EXT[img.mime] || (IMAGE_MIME[urlExt] ? urlExt : null);
+      if (!ext) continue;
+      const cur = ext === '.cur' ? curHotspot(img.buf) : null;
+      const hx = c.hx ?? cur?.hx ?? 0;
+      const hy = c.hy ?? cur?.hy ?? 0;
+      const file = c.url.startsWith('data:') ? `cursor${ext}` : path.basename(new URL(c.url).pathname) || `cursor${ext}`;
+      const id = addCursor(img.buf, ext, { name: `${scan.host || 'page'} · ${file}`, hotspot: 'page', hx, hy, native: true, source: c.url.startsWith('data:') ? scan.host : c.url });
+      added++;
+      if (!main) main = cursorEntry(id);
+    } catch {}
+  }
+  if (main) store.cursor = { ...store.cursor, mode: 'custom', selected: main.id };
+  cursorsChanged();
+  return { found: added, name: main && main.name };
 }
 
 // Open the panel docked against the right edge of the main window, matching its
@@ -1056,8 +1256,19 @@ ipcMain.on('cursor:nudge', (e, dir) => e.sender === page.webContents && nudgeSmo
 ipcMain.on('live:input', (e, ev) => liveCursorOpen() && e.sender === liveCursor.webContents && liveInput(ev));
 ipcMain.handle('live:init', () => ({ settings: cursorPayload(), spans: trackFor(animationKey()).cursor }));
 ipcMain.handle('cursor:pick', pickCursorImage);
+ipcMain.handle('cursor:library', cursorLibrary);
+ipcMain.handle('cursor:from-page', cursorsFromPage);
+ipcMain.on('cursor:remove', (_e, id) => removeCursor(id));
 ipcMain.on('cursor:set', (_e, partial) => {
-  store.cursor = { ...store.cursor, ...partial };
+  const { library, ...rest } = partial;
+  store.cursor = { ...store.cursor, ...rest };
+  save();
+  syncCursor();
+});
+// Changes one library cursor's own settings, like its hotspot.
+ipcMain.on('cursor:set-entry', (_e, id, partial) => {
+  const { hotspot } = partial;
+  store.cursor.library = store.cursor.library.map((e) => (e.id === id ? { ...e, hotspot } : e));
   save();
   syncCursor();
 });

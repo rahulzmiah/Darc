@@ -481,7 +481,7 @@
         log.shapes.push(shape);
       }
       const r = (v) => Math.round(v * 1e5) / 1e5;
-      log.pointer.push([r(this.elapsed()), r(p.x), r(p.y), p.inside ? 1 : 0, log.shapeIds.get(key)]);
+      log.pointer.push([r(this.elapsed()), r(p.x), r(p.y), p.inside ? 1 : 0, log.shapeIds.get(key), p.down ? 1 : 0]);
     }
 
     logAnim(p) {

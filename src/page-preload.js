@@ -362,12 +362,20 @@ ipcRenderer.on('rec:motion', (_e, on) => {
 // The live cursor window gets the same, to draw the smoothed pointer on screen.
 let pointer = null; // { x, y, inside } from the last mouse event
 let pointerSent = '';
+let buttonDown = false; // a mouse button is held over the page
+let pressed = false; // went down since the last frame, so quick clicks still show
 const cursorImages = new Map(); // CSS cursor url -> data URL, null if unfetchable, or a pending fetch
 const cursorIds = new Map(); // CSS cursor url -> short id used on the wire
 const cursorImagesSent = new Set(); // ids already handed to this recording
 
 window.addEventListener('mousemove', (e) => {
   pointer = { x: e.clientX, y: e.clientY, inside: true };
+}, { capture: true, passive: true });
+window.addEventListener('mousedown', () => {
+  buttonDown = pressed = true;
+}, { capture: true, passive: true });
+window.addEventListener('mouseup', () => {
+  buttonDown = false;
 }, { capture: true, passive: true });
 window.addEventListener('mouseout', (e) => {
   if (!e.relatedTarget && pointer) pointer = { ...pointer, inside: false };
@@ -478,7 +486,8 @@ function pointerFrame() {
     const el = document.elementFromPoint(pointer.x, pointer.y);
     if (el) shape = cursorShape(cssCursor(el), el, pointer.x, pointer.y);
   }
-  const msg = { x: pointer.x / innerWidth, y: pointer.y / innerHeight, inside: pointer.inside, shape };
+  const msg = { x: pointer.x / innerWidth, y: pointer.y / innerHeight, inside: pointer.inside, shape, down: buttonDown || pressed };
+  pressed = false;
   const key = JSON.stringify(msg);
   if (key === pointerSent) return;
   pointerSent = key;

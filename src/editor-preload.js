@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('narc', {
   write: (position, data) => ipcRenderer.send('edit:write', position, data),
   finishOutput: (keep) => ipcRenderer.invoke('edit:finish-output', keep),
   copy: () => ipcRenderer.invoke('edit:copy'),
+  cursorLibrary: () => ipcRenderer.invoke('cursor:library'),
   discard: () => ipcRenderer.send('edit:discard'),
   reveal: () => ipcRenderer.send('edit:reveal'),
   close: () => ipcRenderer.send('edit:close'),

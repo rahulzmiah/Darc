@@ -143,7 +143,7 @@
             <option value="off">Off</option>
             <option value="auto">Page's cursor</option>
             <option value="arrow">Arrow</option>
-            <option value="custom">Custom image</option>
+            <optgroup label="Custom image" id="cur-custom"></optgroup>
           </select></div>
         <div class="field"><label>Size</label>
           <input type="range" data-cur="size" min="12" max="64" step="1">
@@ -212,7 +212,9 @@
   let frames = 0; // frames in the video
   let duration = 0; // seconds
   let current = 0; // frame on screen
-  let edits = null; // { in, out (s), spans [{ start, end }] (s), cursor { mode, size, smoothing, damping } }
+  let edits = null; // { in, out (s), spans [{ start, end }] (s), cursor { mode, selected, size, smoothing, damping } }
+  let library = []; // custom cursors to pick from, with their images
+  const TAKE_IMAGE = 'take'; // `selected` for the custom image the take was recorded with
   let recordedSpans = [];
   let dirty = false;
   let saved = null; // { path, name } once saved
@@ -252,6 +254,9 @@
       this.inside = false;
       this.shape = { type: 'default' };
       this.alpha = 0;
+      this.down = false;
+      this.press = 0;
+      this.pressLatch = false;
       this.anim = { playing: false, elapsed: 0 };
       this.visible = false;
     }
@@ -260,11 +265,17 @@
   let layer = null;
   let pointerLog = [];
   let animLog = [];
-  let sim = null; // { x, y, alpha, shape } per frame
+  let sim = null; // { x, y, alpha, shape, press } per frame
   let anyVisible = false;
 
   const baseSettings = () => take.cursor.settings;
-  const cursorSettings = () => ({ ...baseSettings(), ...edits.cursor });
+  // A library cursor picked here brings its own image and hotspot.
+  function cursorSettings() {
+    const c = { ...baseSettings(), ...edits.cursor };
+    const entry = c.selected !== TAKE_IMAGE && library.find((e) => e.id === c.selected);
+    if (entry) Object.assign(c, { image: entry.image, hotspot: entry.hotspot, hx: entry.hx || 0, hy: entry.hy || 0, native: !!entry.native });
+    return c;
+  }
 
   function simulate(recorded) {
     const L = layer;
@@ -276,7 +287,7 @@
       L.configure({ ...s, mode: s.mode === 'off' ? 'auto' : s.mode });
     } else L.configure(cursorSettings());
     const n = frames;
-    const out = recorded ? { want: new Uint8Array(n) } : { x: new Float32Array(n), y: new Float32Array(n), alpha: new Float32Array(n), shape: new Array(n) };
+    const out = recorded ? { want: new Uint8Array(n) } : { x: new Float32Array(n), y: new Float32Array(n), alpha: new Float32Array(n), shape: new Array(n), press: new Float32Array(n) };
     const spans = edits.spans;
     let pi = 0;
     let ai = 0;
@@ -296,6 +307,7 @@
       out.y[i] = L.pos ? L.pos.y : NaN;
       out.alpha[i] = L.alpha;
       out.shape[i] = L.shape;
+      out.press[i] = L.press;
     }
     L.recorded = false;
     L.configure(cursorSettings());
@@ -338,6 +350,7 @@
     layer.pos = { x, y: sim.y[i] };
     layer.alpha = sim.alpha[i];
     layer.shape = sim.shape[i];
+    layer.press = sim.press[i];
     layer.draw(ctx);
   }
 
@@ -355,6 +368,8 @@
     ctx.clearRect(0, 0, w, h);
     ctx.setTransform(w / W, 0, 0, h / H, 0, 0);
     drawCursor(ctx, clamp(current, 0, frames - 1));
+    // A newly picked custom image draws once it has loaded.
+    if (layer && layer.custom && !ready(layer.custom)) layer.custom.decode().then(drawOverlay, () => {});
   }
 
   // ---- Cursor settings -----------------------------------------------------
@@ -362,7 +377,7 @@
   function renderCursor() {
     if (!take) return;
     const c = edits.cursor;
-    $('cur-mode').value = c.mode;
+    $('cur-mode').value = c.mode === 'custom' ? `custom:${c.selected}` : c.mode;
     for (const inp of document.querySelectorAll('[data-cur]')) {
       if (inp !== document.activeElement) inp.value = c[inp.dataset.cur];
     }
@@ -371,7 +386,9 @@
 
   $('cur-mode').addEventListener('change', () => {
     record('mode');
-    edits.cursor.mode = $('cur-mode').value;
+    const [mode, selected] = $('cur-mode').value.split(/:(.*)/);
+    edits.cursor.mode = mode;
+    if (selected) edits.cursor.selected = selected;
     $('cur-mode').blur();
     changed();
   });
@@ -974,7 +991,7 @@
 
   // ---- Load ------------------------------------------------------------------
   async function load() {
-    info = await narc.init();
+    [info, library] = await Promise.all([narc.init(), narc.cursorLibrary()]);
     if (info.error) {
       $('empty').textContent = `Couldn't open the recording.\n${info.error}`;
       return;
@@ -997,23 +1014,39 @@
 
     if (take) {
       const c = take.cursor;
-      pointerLog = c.pointer.map(([t, x, y, inside, si]) => ({ t, x, y, inside: !!inside, shape: c.shapes[si] || { type: 'default' } }));
+      pointerLog = c.pointer.map(([t, x, y, inside, si, down]) => ({ t, x, y, inside: !!inside, shape: c.shapes[si] || { type: 'default' }, down: !!down }));
       animLog = c.anim.map(([t, on, elapsed]) => ({ t, playing: !!on, elapsed }));
       layer = new ReplayCursor({ settings: c.settings, spans: c.spans, scale: c.scale, images: c.images }, W, H);
-      if (!c.settings.image) $('cur-mode').querySelector('[value=custom]').remove();
     }
     const s = take ? take.cursor.settings : {};
+    // The take's own image, unless it's still in the library.
+    const inLibrary = library.some((e) => e.id === s.selected);
+    const customs = [...(s.image && !inLibrary ? [{ id: TAKE_IMAGE, name: `${s.name || 'Recorded image'} (as recorded)` }] : []), ...library];
+    $('cur-custom').replaceChildren(...customs.map((e) => new Option(e.name, `custom:${e.id}`)));
+    if (!customs.length) $('cur-custom').remove();
+    const firstCustom = customs.length ? customs[0].id : null;
     edits = {
       in: 0,
       out: duration,
       spans: [],
-      cursor: { mode: s.mode === 'custom' && !s.image ? 'auto' : s.mode || 'off', size: s.size || 22, smoothing: s.smoothing ?? 120, damping: s.damping || 1 },
+      cursor: {
+        mode: s.mode === 'custom' && !s.image ? 'auto' : s.mode || 'off',
+        selected: inLibrary ? s.selected : s.image ? TAKE_IMAGE : firstCustom,
+        size: s.size || 22,
+        smoothing: s.smoothing ?? 120,
+        damping: s.damping || 1,
+      },
     };
     if (take) {
       recordedSpans = spansFromRecording();
       edits.spans = recordedSpans.map((sp) => ({ ...sp }));
       // Picks up where a kept take was left.
       if (take.edits) edits = { ...edits, ...take.edits, cursor: { ...edits.cursor, ...take.edits.cursor } };
+      // Its custom image may have left the library since.
+      if (!customs.some((e) => e.id === edits.cursor.selected)) {
+        edits.cursor.selected = firstCustom;
+        if (edits.cursor.mode === 'custom' && !firstCustom) edits.cursor.mode = 'auto';
+      }
       sim = simulate(false);
       anyVisible = edits.cursor.mode !== 'off' && sim.alpha.some((a) => a > 0.005);
       // Built-in shapes load asynchronously; draw once they're in.

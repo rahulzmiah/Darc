@@ -153,6 +153,20 @@
 
   .file { grid-column: 2 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; }
   .file span { color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cursor .field.top { align-items: start; }
+  #cursor .field.top > label { padding-top: 6px; }
+  .library { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+  .library:empty { display: none; }
+  .tile { position: relative; width: 40px; height: 40px; display: grid; place-items: center; background: #0b0b0b; border: 1px solid #2a2a2a; }
+  .tile:hover { border-color: #555; }
+  .tile.selected { border-color: #ff4d2e; }
+  .tile img { max-width: 30px; max-height: 30px; pointer-events: none; }
+  .tile .x { position: absolute; top: -6px; right: -6px; width: 14px; height: 14px; line-height: 13px; font-size: 11px; text-align: center; background: #333; color: #fff; border-radius: 50%; display: none; }
+  .tile:hover .x { display: block; }
+  .tile .x:hover { background: #ff4d2e; }
+  .library-actions { grid-column: 2 / -1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .library-actions span { color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .library-wrap { grid-column: 2 / -1; display: grid; gap: 8px; min-width: 0; }
   body:not(.custom-cursor) .custom-only { display: none; }
   .demo { position: relative; margin-top: 12px; }
   .demo canvas { display: block; width: 100%; height: 90px; background: #050505; border: 1px solid #1f1f1f; cursor: none; }
@@ -227,12 +241,20 @@
               <option value="arrow">Arrow</option>
               <option value="custom">Custom image</option>
             </select></div>
-          <div class="field custom-only"><label>Image</label>
-            <div class="file"><button class="btn" id="cur-pick">Choose…</button><span id="cur-name"></span></div></div>
+          <div class="field custom-only top"><label>Image</label>
+            <div class="library-wrap">
+              <div class="library" id="cur-library"></div>
+              <div class="library-actions">
+                <button class="btn" id="cur-pick" title="Add PNG, SVG, GIF, JPEG, WebP or .cur images">Upload…</button>
+                <button class="btn" id="cur-from-page" title="Add the image cursors the page's CSS sets, and use its main one">From page</button>
+                <span id="cur-name"></span>
+              </div>
+            </div></div>
           <div class="field custom-only"><label>Hotspot</label>
             <select id="cur-hotspot" title="The point of the image that sits on the mouse position">
               <option value="tip">Top left</option>
               <option value="center">Center</option>
+              <option value="page" id="cur-hotspot-page" hidden>As the page sets it</option>
             </select></div>
           <div class="field"><label>Size</label>
             <input type="range" data-cur="size" min="12" max="64" step="1">
@@ -246,7 +268,7 @@
           <div class="field"><label>Live</label>
             <label class="check" title="Hide the real pointer over the page and draw this smoothed one instead, so clicking around feels like the footage"><input type="checkbox" id="cur-live">Smooth the pointer on screen too · [ ] adjust</label></div>
           <div class="demo"><canvas id="cur-demo"></canvas><span>Move over the box to try the smoothing</span></div>
-          <p class="note">Drawn into recordings when they're saved from the editor (which can change it per video), and over the page with Live on (where [ and ] step the smoothing, and 0 shows the real pointer). Page's cursor follows the CSS cursor under the mouse, including image cursors. Drag on the Cursor track above to choose when it shows during the animation; with no spans it shows whenever the mouse is over the page.</p>
+          <p class="note">Drawn into recordings when they're saved from the editor (which can change it per video), and over the page with Live on (where [ and ] step the smoothing, and 0 shows the real pointer). Page's cursor follows the CSS cursor under the mouse, including image cursors; Custom image draws one image everywhere, and From page adds the image cursors the page's CSS sets to the images to pick from. Drag on the Cursor track above to choose when it shows during the animation; with no spans it shows whenever the mouse is over the page.</p>
         </div>
       </section>
     </div>
@@ -255,6 +277,7 @@
 </main>
 
 <script src="cursor-shapes.js"></script>
+<script src="cursor-layer.js"></script>
 <script>
   const EASINGS = [
     ['Linear', [0, 0, 1, 1]],
@@ -873,6 +896,7 @@
   const MODES = { off: 'Off', auto: "Page's cursor", arrow: 'Arrow', custom: 'Custom image' };
   const ARROW_SRC = `data:image/svg+xml,${encodeURIComponent(CURSOR_SVGS.default)}`; // 32-unit frame, hotspot at its center
   let cursor = null; // settings from the main process
+  let library = []; // custom cursors, with their images
   const cursorPanel = $('cursor');
   const arrowImg = new Image();
   arrowImg.src = ARROW_SRC;
@@ -888,8 +912,13 @@
     if (!cursor) return;
     $('cur-mode').value = cursor.mode;
     document.body.classList.toggle('custom-cursor', cursor.mode === 'custom');
-    $('cur-name').textContent = cursor.custom ? cursor.custom.name : 'No image chosen';
-    $('cur-hotspot').value = cursor.hotspot || 'tip';
+    const entry = library.find((e) => e.id === cursor.selected);
+    $('cur-name').textContent = entry ? entry.name : library.length ? 'Pick an image' : 'No images yet';
+    $('cur-name').title = entry ? entry.source || entry.name : '';
+    $('cur-hotspot-page').hidden = !entry || entry.hx == null;
+    $('cur-hotspot').value = (entry && entry.hotspot) || 'tip';
+    $('cur-hotspot').disabled = !entry;
+    for (const tile of $('cur-library').children) tile.classList.toggle('selected', tile.dataset.id === cursor.selected);
     $('cur-live').checked = !!cursor.live;
     for (const inp of cursorPanel.querySelectorAll('[data-cur]')) {
       if (inp !== document.activeElement) inp.value = cursor[inp.dataset.cur];
@@ -904,9 +933,31 @@
   }
 
   function saveCursor() {
-    const { mode, hotspot, size, smoothing, damping, live } = cursor;
-    narc.cursorSet({ mode, hotspot, size, smoothing, damping, live });
+    const { mode, selected, size, smoothing, damping, live } = cursor;
+    narc.cursorSet({ mode, selected, size, smoothing, damping, live });
   }
+
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  function renderLibrary() {
+    $('cur-library').innerHTML = library.map((e) => `<button class="tile" data-id="${esc(e.id)}" title="${esc(e.name)}">${e.image ? `<img src="${esc(e.image)}" alt="">` : ''}<span class="x" data-remove="${esc(e.id)}" title="Remove">×</span></button>`).join('');
+    renderCursor();
+  }
+
+  $('cur-library').addEventListener('click', (e) => {
+    const remove = e.target.closest('[data-remove]');
+    if (remove) {
+      narc.cursorRemove(remove.dataset.remove);
+      return;
+    }
+    const tile = e.target.closest('.tile');
+    if (!tile || !cursor) return;
+    tile.blur();
+    cursor.selected = tile.dataset.id;
+    const entry = library.find((x) => x.id === cursor.selected);
+    Object.assign(cursor, { image: entry.image, hotspot: entry.hotspot, hx: entry.hx || 0, hy: entry.hy || 0, native: !!entry.native });
+    saveCursor();
+    renderCursor();
+  });
 
   cursorPanel.addEventListener('input', (e) => {
     if (!cursor) return;
@@ -919,6 +970,13 @@
     } else if (e.target === $('cur-hotspot')) {
       cursor.hotspot = e.target.value;
       e.target.blur();
+      const entry = library.find((x) => x.id === cursor.selected);
+      if (entry) {
+        entry.hotspot = cursor.hotspot;
+        narc.cursorSetEntry(entry.id, { hotspot: cursor.hotspot });
+      }
+      renderCursor();
+      return;
     } else if (e.target.dataset.cur) {
       const v = parseFloat(e.target.value);
       if (Number.isNaN(v)) return;
@@ -930,11 +988,23 @@
   });
 
   $('cur-pick').addEventListener('click', async () => {
+    $('cur-pick').blur();
     const c = await narc.cursorPick();
     if (c) {
       cursor = c;
       renderCursor();
     }
+  });
+
+  $('cur-from-page').addEventListener('click', async () => {
+    const btn = $('cur-from-page');
+    btn.blur();
+    btn.disabled = true;
+    btn.textContent = 'Looking…';
+    const res = await narc.cursorFromPage();
+    btn.disabled = false;
+    btn.textContent = 'From page';
+    if (!res.found) $('cur-name').textContent = 'The page sets no image cursors';
   });
 
   // Demo: the chosen cursor chases the mouse across the box with the current
@@ -993,10 +1063,7 @@
     const pos = demo.pos || { x: w / 2, y: h / 2 };
     const size = cursor.size || 22;
     if (cursor.mode === 'custom' && customImg && customImg.complete && customImg.naturalWidth) {
-      const ih = size;
-      const iw = (customImg.naturalWidth / customImg.naturalHeight) * ih;
-      const hx = cursor.hotspot === 'center' ? iw / 2 : 0;
-      const hy = cursor.hotspot === 'center' ? ih / 2 : 0;
+      const { w: iw, h: ih, hx, hy } = customCursorBox(customImg, { ...cursor, size }, 1);
       ctx.drawImage(customImg, pos.x - hx, pos.y - hy, iw, ih);
     } else if (arrowImg.complete && arrowImg.naturalWidth) {
       const s = (size / 22) * 32; // size 22 is macOS's own pointer size
@@ -1009,9 +1076,14 @@
   }
   arrowImg.onload = renderDemo;
 
-  narc.cursorGet().then((c) => {
+  Promise.all([narc.cursorGet(), narc.cursorLibrary()]).then(([c, lib]) => {
     cursor = c;
-    renderCursor();
+    library = lib;
+    renderLibrary();
+  });
+  narc.onCursorLibrary((lib) => {
+    library = lib;
+    renderLibrary();
   });
   // [ and ] on the page change the smoothing from outside the panel.
   narc.onCursor((c) => {

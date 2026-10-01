@@ -1,0 +1,729 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'">
+<style>
+  * { box-sizing: border-box; margin: 0; border-radius: 0 !important; }
+  html, body { height: 100%; overflow: hidden; background: transparent; }
+  body {
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    color: #ededed;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  body.playing, body.playing * { cursor: none !important; }
+  #c { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+
+  #bar {
+    position: absolute; left: 12px; right: 12px; bottom: 12px; height: 44px;
+    display: flex; align-items: center; gap: 10px; padding: 0 10px;
+    background: rgba(11, 11, 11, 0.92); border: 1px solid #2a2a2a;
+    font-variant-numeric: tabular-nums;
+  }
+  body.playing #bar { display: none; }
+  body.top #bar { top: 12px; bottom: auto; }
+  .btn { padding: 4px 9px; border: 1px solid #333; color: #bbb; white-space: nowrap; }
+  .btn:hover { color: #fff; border-color: #555; }
+  .btn.on { color: #fff; border-color: #4da3ff; background: rgba(77, 163, 255, 0.15); }
+  #play { width: 30px; text-align: center; padding: 4px 0; }
+  #time { min-width: 86px; color: #999; }
+  #time b { color: #fff; font-weight: 600; }
+  #track { flex: 1; min-width: 80px; height: 26px; display: block; cursor: col-resize; }
+  #inspect { display: none; align-items: center; gap: 8px; color: #888; white-space: nowrap; }
+  body.selected #inspect { display: flex; }
+  #inspect label { display: flex; align-items: center; gap: 4px; }
+  #inspect input, #inspect select {
+    width: 52px; padding: 3px 4px; background: #0b0b0b; border: 1px solid #2a2a2a; color: #ddd;
+    font: inherit; outline: 0;
+  }
+  #inspect select { width: auto; }
+  #inspect input:focus, #inspect select:focus { border-color: #4da3ff; }
+  #inspect input:disabled, #inspect select:disabled { opacity: 0.35; }
+  .sep { width: 1px; height: 20px; background: #2a2a2a; }
+  #startwrap { display: flex; align-items: center; gap: 6px; color: #888; white-space: nowrap; }
+  #start { padding: 3px 4px; background: #0b0b0b; border: 1px solid #2a2a2a; color: #ddd; font: inherit; outline: 0; }
+  #start:focus { border-color: #4da3ff; }
+  #delete.armed { color: #ff8a8a; border-color: #ff8a8a; }
+  #hint { color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  body.selected #hint { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button class="btn" id="play" title="Play from the playhead (space)">▶</button>
+  <span id="time"><b>0.00</b> / 0.00 s</span>
+  <canvas id="track"></canvas>
+  <span id="hint">Click the path to scrub · double-click to add a point · ⌥-drag a point for handles</span>
+  <span id="inspect">
+    <button class="btn" id="click" title="Click here (C)">Click</button>
+    <label title="Extra time to wait here; the scroll waits too">Pause <input id="pause" type="number" min="0" step="0.1"> s</label>
+    <label title="How long the move to the next point takes">Move <input id="move" type="number" min="0" step="0.05"> s</label>
+    <select id="ease" title="How the move to the next point eases">
+      <option value="recorded">As recorded</option>
+      <option value="ease">Ease in-out</option>
+      <option value="out">Ease out</option>
+      <option value="linear">Linear</option>
+    </select>
+  </span>
+  <span class="sep"></span>
+  <label id="startwrap" title="When the path plays: as soon as play is pressed, or once the scroll animation reaches one of its lines (⌘.), which then waits for it">Starts <select id="start"></select></label>
+  <button class="btn" id="delete" title="Delete this page's cursor path">Delete</button>
+  <button class="btn" id="done" title="Close (Esc)">Done</button>
+</div>
+<script src="cursor-shapes.js"></script>
+<script src="cursor-layer.js"></script>
+<script src="cursor-path.js"></script>
+<script>
+  // The cursor path over the page. Editing, it draws the path for dragging its
+  // points and handles, and scrubbing puts the page's scroll and the pointer
+  // where they were at that moment. Playing, it feeds the page the path's
+  // pointer and scroll every frame (and takes the real mouse, so it can't
+  // interfere), drawing the pointer on screen; recordings draw their own.
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('c');
+  const ctx = canvas.getContext('2d');
+  const track = $('track');
+  const tctx = track.getContext('2d');
+  const ACCENT = '#4da3ff';
+  const CLICK = '#ff4d2e';
+  const BUTTON_MODS = { left: 'leftButtonDown', middle: 'middleButtonDown', right: 'rightButtonDown' };
+  const FRAME = 1000 / 60;
+
+  let dpr = devicePixelRatio || 1;
+  let mode = null; // 'edit' | 'play' (opened to play) | 'preview' (playing from the editor)
+  let key = null;
+  let path = null;
+  let tl = null;
+  let playhead = 0;
+  let selected = null; // anchor index
+  let drag = null;
+  let undo = [];
+  let redo = [];
+  let play = null; // { start, next, held }
+  let raf = 0;
+  let last = 0;
+  let sent = null; // pointer position last handed to the page
+  let sentScroll = null;
+  let layer = null;
+  let saveTimer = 0;
+
+  function fit() {
+    dpr = devicePixelRatio || 1;
+    canvas.width = Math.round(innerWidth * dpr);
+    canvas.height = Math.round(innerHeight * dpr);
+    const r = track.getBoundingClientRect();
+    track.width = Math.max(1, Math.round(r.width * dpr));
+    track.height = Math.max(1, Math.round(r.height * dpr));
+    if (layer) {
+      layer.width = canvas.width;
+      layer.height = canvas.height;
+      layer.scale = dpr;
+    }
+    wake();
+  }
+
+  function rebuild() {
+    tl = CursorPath.timeline(path);
+    playhead = Math.min(playhead, tl.end);
+  }
+
+  // ---- The page ------------------------------------------------------------
+  const held = () => (play ? [...play.held].map((b) => BUTTON_MODS[b]) : []);
+
+  function sendMove(x, y) {
+    x = Math.round(x);
+    y = Math.round(y);
+    if (sent && sent.x === x && sent.y === y) return;
+    sent = { x, y };
+    narc.input({ type: 'mouseMove', x, y, modifiers: held() });
+  }
+
+  function sendScroll(y) {
+    y = Math.round(y * 2) / 2;
+    if (y === sentScroll) return;
+    sentScroll = y;
+    narc.scroll(y);
+  }
+
+  // Put the page and the pointer where they were at played time t.
+  function apply(t) {
+    const s = tl.at(t);
+    sendScroll(s.sy);
+    sendMove(s.x, s.y);
+    if (layer) layer.moveTo(s.x * dpr, s.y * dpr, true);
+    return s;
+  }
+
+  function seek(t) {
+    playhead = Math.max(0, Math.min(tl.end, t));
+    apply(playhead);
+    wake();
+  }
+
+  // ---- Playback -------------------------------------------------------------
+  // Ease from scroll position `y` to where the path starts, rather than jump.
+  function leadIn(y) {
+    const to = tl.at(0).sy;
+    const d = Math.abs(to - y);
+    if (y == null || d < 2) return null;
+    return { from: y, to, len: Math.min(1800, 450 + Math.sqrt(d) * 16) };
+  }
+  const easeInOut = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+
+  function startPlay(from, scrollY) {
+    if (!tl.end) return;
+    if (from >= tl.end - 1) from = 0;
+    if (layer) layer.pressLatch = false;
+    const lead = from === 0 ? leadIn(scrollY) : null;
+    play = { start: performance.now() - from + (lead ? lead.len : 0), lead, next: tl.events.findIndex((e) => e.T >= from), held: new Set() };
+    if (play.next < 0) play.next = tl.events.length;
+    if (mode === 'edit') mode = 'preview';
+    document.body.classList.add('playing');
+    $('play').textContent = '■';
+    sent = sentScroll = null;
+    if (lead) {
+      sendScroll(lead.from);
+      apply0();
+    } else apply(from);
+    narc.progress({ playing: true, elapsed: from, total: tl.end });
+    wake();
+  }
+
+  // The pointer waits at the first point while the page glides into place.
+  function apply0() {
+    const s = tl.at(0);
+    sendMove(s.x, s.y);
+    if (layer) layer.moveTo(s.x * dpr, s.y * dpr, true);
+  }
+
+  function stopPlay(finished) {
+    if (!play) return;
+    const s = tl.at(playhead);
+    for (const b of play.held) narc.input({ type: 'mouseUp', x: Math.round(s.x), y: Math.round(s.y), button: b, clickCount: 1, modifiers: [] });
+    play = null;
+    narc.progress({ playing: false, finished: !!finished });
+    document.body.classList.remove('playing');
+    $('play').textContent = '▶';
+    if (mode === 'play') {
+      mode = null;
+      narc.close();
+    } else {
+      mode = 'edit';
+      wake();
+    }
+  }
+
+  function playFrame(now) {
+    if (play.lead && now < play.start) {
+      const k = 1 - (play.start - now) / play.lead.len;
+      sendScroll(play.lead.from + (play.lead.to - play.lead.from) * easeInOut(Math.max(0, k)));
+      apply0();
+      narc.progress({ playing: true, elapsed: 0, total: tl.end });
+      return null;
+    }
+    const t = Math.min(tl.end, now - play.start);
+    playhead = t;
+    const s = apply(t);
+    // Presses and releases due by now, each at the pointer's spot.
+    while (play && play.next < tl.events.length && tl.events[play.next].T <= t) {
+      const e = tl.events[play.next++];
+      const at = tl.at(e.T);
+      sendMove(at.x, at.y);
+      if (e.type === 'down') play.held.add(e.button);
+      else play.held.delete(e.button);
+      narc.input({ type: e.type === 'down' ? 'mouseDown' : 'mouseUp', x: Math.round(at.x), y: Math.round(at.y), button: e.button, clickCount: e.count || 1, modifiers: held() });
+    }
+    narc.progress({ playing: true, elapsed: t, total: tl.end });
+    if (t >= tl.end) stopPlay(true);
+    return s;
+  }
+
+  // ---- Drawing --------------------------------------------------------------
+  function frame(now) {
+    raf = 0;
+    const dt = Math.max(1 / 240, Math.min((now - last) / 1000, 1 / 20));
+    last = now;
+    if (!path) return;
+    if (play) playFrame(now);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (mode === 'edit' || mode === 'preview') drawPath();
+    if (layer) {
+      layer.step(dt);
+      layer.draw(ctx);
+    }
+    if (mode === 'edit' || mode === 'preview') drawTrack();
+    renderTime();
+    if (play || (layer && !layer.settled())) wake();
+  }
+
+  function wake() {
+    if (raf) return;
+    last = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function strokeCurves(width, color) {
+    ctx.beginPath();
+    for (let i = 0; i < path.segments.length; i++) {
+      const c = CursorPath.cubicOf(path, i);
+      ctx.moveTo(c[0].x * dpr, c[0].y * dpr);
+      ctx.bezierCurveTo(c[1].x * dpr, c[1].y * dpr, c[2].x * dpr, c[2].y * dpr, c[3].x * dpr, c[3].y * dpr);
+    }
+    ctx.lineWidth = width * dpr;
+    ctx.strokeStyle = color;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+
+  function clickNumbers() {
+    const nums = new Map();
+    let n = 0;
+    path.anchors.forEach((a, i) => {
+      if (a.buttons.some((b) => b.type === 'down')) nums.set(i, ++n);
+    });
+    return nums;
+  }
+
+  function drawPath() {
+    strokeCurves(4, 'rgba(0, 0, 0, 0.45)');
+    strokeCurves(2, ACCENT);
+    const nums = clickNumbers();
+    const sel = selected != null ? path.anchors[selected] : null;
+    if (sel && mode === 'edit') {
+      for (const h of ['hin', 'hout']) {
+        if (!sel[h].x && !sel[h].y) continue;
+        const hx = (sel.x + sel[h].x) * dpr, hy = (sel.y + sel[h].y) * dpr;
+        ctx.beginPath();
+        ctx.moveTo(sel.x * dpr, sel.y * dpr);
+        ctx.lineTo(hx, hy);
+        ctx.lineWidth = dpr;
+        ctx.strokeStyle = ACCENT;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(hx, hy, 4 * dpr, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    path.anchors.forEach((a, i) => {
+      const x = a.x * dpr, y = a.y * dpr;
+      if (nums.has(i)) {
+        ctx.beginPath();
+        ctx.arc(x, y, 11 * dpr, 0, Math.PI * 2);
+        ctx.lineWidth = 2 * dpr;
+        ctx.strokeStyle = CLICK;
+        ctx.stroke();
+        ctx.font = `600 ${10 * dpr}px -apple-system, sans-serif`;
+        ctx.fillStyle = CLICK;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(nums.get(i)), x + 14 * dpr, y - 10 * dpr);
+      }
+      const s = 7 * dpr;
+      ctx.fillStyle = i === selected ? ACCENT : '#fff';
+      ctx.strokeStyle = i === selected ? '#fff' : ACCENT;
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+      ctx.strokeRect(x - s / 2, y - s / 2, s, s);
+    });
+  }
+
+  const fmt = (ms) => (ms / 1000).toFixed(2);
+
+  function renderTime() {
+    $('time').innerHTML = `<b>${fmt(playhead)}</b> / ${fmt(tl ? tl.end : 0)} s`;
+  }
+
+  function drawTrack() {
+    const w = track.width, h = track.height;
+    tctx.clearRect(0, 0, w, h);
+    if (!tl || !tl.end) return;
+    const X = (t) => (t / tl.end) * (w - 2 * dpr) + dpr;
+    tctx.fillStyle = '#1a1a1a';
+    tctx.fillRect(0, h * 0.3, w, h * 0.4);
+    for (const p of tl.pieces) {
+      if (p.kind === 'move') tctx.fillStyle = 'rgba(77, 163, 255, 0.45)';
+      else if (p.kind === 'pause') tctx.fillStyle = 'rgba(255, 255, 255, 0.28)';
+      else tctx.fillStyle = 'rgba(255, 255, 255, 0.08)'; // resting, as recorded
+      tctx.fillRect(X(p.start), h * 0.3, Math.max(dpr, X(p.start + p.len) - X(p.start)), h * 0.4);
+    }
+    tl.arrivals.forEach((t, i) => {
+      tctx.fillStyle = i === selected ? '#fff' : '#777';
+      tctx.fillRect(Math.round(X(t) - dpr / 2), h * 0.2, dpr * (i === selected ? 2 : 1), h * 0.6);
+    });
+    tctx.fillStyle = CLICK;
+    for (const e of tl.events) {
+      if (e.type !== 'down') continue;
+      tctx.beginPath();
+      tctx.arc(X(e.T), h * 0.5, 3 * dpr, 0, Math.PI * 2);
+      tctx.fill();
+    }
+    tctx.fillStyle = '#fff';
+    tctx.fillRect(Math.round(X(playhead) - dpr), 0, 2 * dpr, h);
+  }
+
+  // ---- Editing --------------------------------------------------------------
+  function commit(next) {
+    undo.push(path);
+    if (undo.length > 200) undo.shift();
+    redo = [];
+    path = next;
+    changed();
+  }
+
+  function changed() {
+    rebuild();
+    if (selected != null && selected >= path.anchors.length) selected = null;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => narc.save(key, path), 250);
+    inspect();
+    renderStart();
+    seek(playhead);
+  }
+
+  const copy = (p) => JSON.parse(JSON.stringify(p));
+
+  function select(i, scrub) {
+    selected = i;
+    document.body.classList.toggle('selected', i != null);
+    inspect();
+    if (i != null && scrub) seek(tl.arrivals[i]);
+    wake();
+  }
+
+  // The bar shows the selected point: whether it clicks, its pause, and the move after it.
+  function inspect() {
+    if (selected == null || !path) return;
+    const a = path.anchors[selected];
+    $('click').classList.toggle('on', a.buttons.some((b) => b.type === 'down'));
+    if (document.activeElement !== $('pause')) $('pause').value = +(a.pause / 1000).toFixed(2);
+    const seg = path.segments[selected];
+    $('move').disabled = $('ease').disabled = !seg;
+    if (seg) {
+      const piece = tl.pieces.find((p) => p.kind === 'move' && p.i === selected);
+      if (document.activeElement !== $('move')) $('move').value = piece ? +(piece.len / 1000).toFixed(2) : 0;
+      $('ease').value = seg.ease || 'recorded';
+    } else {
+      $('move').value = '';
+    }
+  }
+
+  function toggleClick() {
+    if (selected == null) return;
+    const next = copy(path);
+    const a = next.anchors[selected];
+    if (a.buttons.some((b) => b.type === 'down')) {
+      a.buttons = [];
+    } else {
+      // Holds the pointer still for the click if it was only passing through.
+      a.buttons = [{ at: 0, wait: 0, type: 'down', button: 'left', count: 1 }, { at: Math.min(a.dwell, 90), wait: a.dwell >= 90 ? 0 : 90, type: 'up', button: 'left', count: 1 }];
+      if (a.dwell < 90) a.pause = Math.max(a.pause, 150);
+    }
+    commit(next);
+  }
+
+  function removeSelected() {
+    if (selected == null) return;
+    if (selected === 0 || selected === path.anchors.length - 1) return;
+    const next = CursorPath.removeAnchor(path, selected);
+    selected = null;
+    document.body.classList.remove('selected');
+    commit(next);
+  }
+
+  function hit(x, y) {
+    const sel = selected != null ? path.anchors[selected] : null;
+    if (sel) {
+      for (const h of ['hin', 'hout']) {
+        if ((sel[h].x || sel[h].y) && Math.hypot(sel.x + sel[h].x - x, sel.y + sel[h].y - y) <= 7) return { kind: 'handle', i: selected, h };
+      }
+    }
+    let best = null;
+    path.anchors.forEach((a, i) => {
+      const d = Math.hypot(a.x - x, a.y - y);
+      if (d <= 8 && (!best || d < best.d)) best = { kind: 'anchor', i, d };
+    });
+    if (best) return best;
+    const near = tl.nearest(x, y);
+    if (near && near.d <= 7) return { kind: 'curve', ...near };
+    return null;
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (mode !== 'edit' || e.button !== 0) return;
+    const x = e.clientX, y = e.clientY;
+    const h = hit(x, y);
+    if (!h) {
+      select(null);
+      return;
+    }
+    if (h.kind === 'curve') {
+      if (e.detail >= 2 && h.segment != null) {
+        const next = CursorPath.insertAnchor(path, h.segment, h.f);
+        commit(next);
+        select(h.segment + 1, true);
+        return;
+      }
+      seek(h.t);
+      drag = { kind: 'scrub' };
+      return;
+    }
+    if (h.kind === 'anchor') {
+      select(h.i, true);
+      drag = { kind: e.altKey ? 'pull' : 'anchor', i: h.i, from: { x, y }, base: copy(path), moved: false };
+      return;
+    }
+    drag = { kind: 'handle', i: h.i, h: h.h, alt: e.altKey, base: copy(path), moved: false };
+  });
+
+  addEventListener('mousemove', (e) => {
+    if (mode !== 'edit') return;
+    const x = e.clientX, y = e.clientY;
+    if (!drag) {
+      const h = e.target === canvas ? hit(x, y) : null;
+      canvas.style.cursor = !h ? 'default' : h.kind === 'curve' ? 'crosshair' : 'move';
+      return;
+    }
+    if (drag.kind === 'scrub') {
+      const near = tl.nearest(x, y);
+      if (near) seek(near.t);
+      return;
+    }
+    const next = copy(drag.base);
+    const a = next.anchors[drag.i];
+    if (drag.kind === 'anchor') {
+      a.x = Math.round((a.x + x - drag.from.x) * 100) / 100;
+      a.y = Math.round((a.y + y - drag.from.y) * 100) / 100;
+    } else if (drag.kind === 'pull') {
+      // ⌥-drag a point to pull out a pair of mirrored handles.
+      a.hout = { x: x - a.x, y: y - a.y };
+      a.hin = { x: a.x - x, y: a.y - y };
+    } else {
+      const other = drag.h === 'hin' ? 'hout' : 'hin';
+      a[drag.h] = { x: x - a.x, y: y - a.y };
+      // The opposite handle keeps its length but stays in line, unless ⌥ is held.
+      const ol = Math.hypot(a[other].x, a[other].y);
+      const l = Math.hypot(a[drag.h].x, a[drag.h].y);
+      if (!e.altKey && !drag.alt && ol > 0 && l > 0) a[other] = { x: (-a[drag.h].x / l) * ol, y: (-a[drag.h].y / l) * ol };
+    }
+    drag.moved = true;
+    path = next;
+    rebuild();
+    seek(playhead);
+  });
+
+  addEventListener('mouseup', () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (d.moved) {
+      const next = path;
+      path = d.base;
+      commit(next);
+    }
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    if (mode !== 'edit') return;
+    e.preventDefault();
+    seek(playhead + (e.deltaY + e.deltaX) * 2);
+  }, { passive: false });
+
+  // The bar's timeline: drag to scrub, click a tick to pick its point.
+  function trackTime(e) {
+    const r = track.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - r.left - 1) / (r.width - 2))) * tl.end;
+  }
+  track.addEventListener('mousedown', (e) => {
+    if (mode !== 'edit' || !tl.end) return;
+    const t = trackTime(e);
+    const r = track.getBoundingClientRect();
+    const tol = (4 / r.width) * tl.end;
+    const i = tl.arrivals.findIndex((a) => Math.abs(a - t) <= tol);
+    if (i >= 0) select(i);
+    seek(i >= 0 ? tl.arrivals[i] : t);
+    const move = (ev) => seek(trackTime(ev));
+    const up = () => {
+      removeEventListener('mousemove', move);
+      removeEventListener('mouseup', up);
+    };
+    addEventListener('mousemove', move);
+    addEventListener('mouseup', up);
+  });
+
+  // Keeps the bar out of the way of the path when the path runs along the bottom.
+  function placeBar() {
+    const bottom = innerHeight - 70;
+    const low = path.anchors.filter((a) => a.y > bottom).length;
+    document.body.classList.toggle('top', low > path.anchors.length / 2);
+  }
+
+  // The scroll animation's lines, for starting the path at one of them.
+  let lines = [];
+  function renderStart() {
+    const sel = $('start');
+    const at = path.startAfter;
+    sel.innerHTML = '';
+    const opt = (value, text) => {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = text;
+      sel.appendChild(o);
+    };
+    opt('', 'Right away');
+    lines.forEach((y, i) => opt(String(i), `At line ${i + 1} · ${Math.round(y)} px`));
+    if (at != null && at >= lines.length) opt(String(at), `At line ${at + 1} (gone)`);
+    sel.value = at == null ? '' : String(at);
+  }
+  $('start').addEventListener('change', () => {
+    const next = copy(path);
+    const v = $('start').value;
+    if (v === '') delete next.startAfter;
+    else next.startAfter = +v;
+    commit(next);
+    $('start').blur();
+  });
+
+  $('play').addEventListener('click', () => (play ? stopPlay(false) : startPlay(playhead)));
+  $('click').addEventListener('click', toggleClick);
+  $('done').addEventListener('click', () => narc.close());
+  let deleteArmed = 0;
+  $('delete').addEventListener('click', () => {
+    if (deleteArmed) {
+      clearTimeout(deleteArmed);
+      narc.remove(key);
+      return;
+    }
+    $('delete').classList.add('armed');
+    $('delete').textContent = 'Delete?';
+    deleteArmed = setTimeout(() => {
+      deleteArmed = 0;
+      $('delete').classList.remove('armed');
+      $('delete').textContent = 'Delete';
+    }, 2500);
+  });
+  $('pause').addEventListener('change', () => {
+    if (selected == null) return;
+    const next = copy(path);
+    next.anchors[selected].pause = Math.max(0, Math.round((+$('pause').value || 0) * 1000));
+    commit(next);
+  });
+  $('move').addEventListener('change', () => {
+    if (selected == null || !path.segments[selected]) return;
+    const a = path.anchors[selected], b = path.anchors[selected + 1];
+    const recorded = b.t - (a.t + a.dwell);
+    if (recorded <= 0) return;
+    const next = copy(path);
+    next.segments[selected].scale = Math.max(0.05, Math.round(((+$('move').value || 0) * 1000 / recorded) * 1000) / 1000);
+    commit(next);
+  });
+  $('ease').addEventListener('change', () => {
+    if (selected == null || !path.segments[selected]) return;
+    const next = copy(path);
+    next.segments[selected].ease = $('ease').value;
+    commit(next);
+    $('ease').blur();
+  });
+  for (const id of ['pause', 'move']) {
+    $(id).addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === 'Escape') $(id).blur();
+      e.stopPropagation();
+    });
+  }
+
+  addEventListener('keydown', (e) => {
+    if (!mode) return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (mode === 'play') {
+      if (e.key === 'Escape' || e.key === ' ') {
+        e.preventDefault();
+        stopPlay(false);
+      }
+      return;
+    }
+    const k = e.key.toLowerCase();
+    if (e.metaKey && k === 'z') {
+      e.preventDefault();
+      const from = e.shiftKey ? redo : undo;
+      const to = e.shiftKey ? undo : redo;
+      if (!from.length) return;
+      to.push(path);
+      path = from.pop();
+      changed();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey) return;
+    if (e.key === ' ') {
+      e.preventDefault();
+      if (!e.repeat) play ? stopPlay(false) : startPlay(playhead);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      if (play) stopPlay(false);
+      else if (selected != null) select(null);
+      else narc.close();
+    } else if (play) {
+      // Nothing else while previewing.
+    } else if (e.key === 'Backspace' || e.key === 'Delete') {
+      e.preventDefault();
+      removeSelected();
+    } else if (k === 'c') {
+      toggleClick();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      seek(playhead + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1000 : FRAME));
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      const n = path.anchors.length;
+      select(selected == null ? 0 : (selected + (e.shiftKey ? n - 1 : 1)) % n, true);
+    }
+  });
+
+  addEventListener('contextmenu', (e) => e.preventDefault());
+
+  narc.onOpen((data) => {
+    if (play) stopPlay(false);
+    mode = data.mode;
+    key = data.key;
+    path = data.path;
+    undo = [];
+    redo = [];
+    selected = null;
+    document.body.classList.remove('selected');
+    sent = sentScroll = null;
+    rebuild();
+    if (!layer) layer = new CursorLayer({ settings: data.cursor, spans: [], scale: dpr, images: [], live: true }, canvas.width, canvas.height);
+    else layer.configure(data.cursor);
+    fit();
+    placeBar();
+    lines = data.lines || [];
+    renderStart();
+    if (mode === 'play') {
+      startPlay(0, data.from);
+    } else {
+      document.body.classList.remove('playing');
+      playhead = 0;
+      seek(0);
+    }
+  });
+  narc.onStop(() => play && stopPlay(false));
+  narc.onPointer((p) => {
+    if (!layer) return;
+    layer.pointer(p);
+    wake();
+  });
+  narc.onCursorImage((img) => {
+    if (!layer) return;
+    layer.image(img);
+    wake();
+  });
+  addEventListener('resize', fit);
+  // The track resizes with what the bar shows.
+  new ResizeObserver(fit).observe(track);
+</script>
+</body>
+</html>

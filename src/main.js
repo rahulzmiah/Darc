@@ -1,6 +1,8 @@
 const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen, shell, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
+const { readMp4Index } = require('./mp4-index');
 
 const DEFAULTS = {
   mouseSpeed: 1,
@@ -37,7 +39,7 @@ if (!fs.existsSync(storePath) && fs.existsSync(legacyStorePath)) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
   fs.copyFileSync(legacyStorePath, storePath);
 }
-let store = { settings: { ...DEFAULTS }, cursor: { ...CURSOR_DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorWidth: 680, reloadOnRecord: true, recordHeight: 'native', motionBlur: 0 };
+let store = { settings: { ...DEFAULTS }, cursor: { ...CURSOR_DEFAULTS }, lastUrl: '', bounds: null, animations: {}, animatorWidth: 680, reloadOnRecord: true, playOnRecord: false, recordHeight: 'native', motionBlur: 0 };
 try {
   const saved = JSON.parse(fs.readFileSync(storePath, 'utf8'));
   store = { ...store, ...saved, settings: { ...DEFAULTS, ...saved.settings }, cursor: { ...CURSOR_DEFAULTS, ...saved.cursor } };
@@ -58,10 +60,17 @@ const RECORDER_HEIGHT = 112;
 const recorderQueue = []; // callbacks waiting for the recorder page to load
 let recording = null; // { fd, path, name } while the pane writes a file
 let recordingActive = false; // the pane is capturing (starting, recording or saving)
-let lastRecording = null;
+let lastRecording = null; // last video saved from the editor
+let lastTake = null; // last recording, waiting in the editor to be saved
 let closingForRecording = false; // window close deferred until the recording is saved
 let pendingReload = false; // the pane asked for a reload; skip its navigation marker
 let animPlaying = false;
+// A recording that reloads the page: { issued } until the reloaded page has
+// loaded. Playing the animation before then would scroll the page that's
+// about to be replaced, so it waits (queuedPlay) and starts after the load.
+let recordReload = null;
+let queuedPlay = false;
+const PLAY_AFTER_LOAD = 250; // ms after the reloaded page loads
 let markerPrompt = null; // { key } while the toast is asking to restart a timeline
 let markerVisitKey = null; // page whose saved timeline the user has already been asked about this visit
 let overlayMode = null;
@@ -173,6 +182,15 @@ function toggleRecording() {
 
 function setRecordingActive(on) {
   if (!win || win.isDestroyed()) return;
+  if (on && !recordingActive && store.reloadOnRecord !== false) recordReload = { issued: false };
+  if (!on && recordReload) {
+    // Never got as far as the reload (capture failed to start).
+    recordReload = null;
+    if (queuedPlay) {
+      queuedPlay = false;
+      playAnimation();
+    }
+  }
   recordingActive = on;
   sendToAnimator('rec:state', on);
   // The page streams its scroll velocity to the recorder while capturing.
@@ -187,6 +205,22 @@ function setRecordingActive(on) {
 
 function recordingsDir() {
   return path.join(app.getPath('videos'), 'Darc');
+}
+
+// Recordings land here first, without a cursor, until the editor saves them.
+function takesDir() {
+  return path.join(recordingsDir(), 'Unsaved');
+}
+
+// What the recorder logged alongside a take: the pointer, animation playback
+// and cursor settings, so the editor can draw the cursor afterwards.
+const sidecarPath = (file) => file.replace(/\.mp4$/i, '.darc.json');
+const isTake = (file) => path.dirname(file) === takesDir();
+
+function removeTake(file) {
+  fs.rmSync(file, { force: true });
+  fs.rmSync(sidecarPath(file), { force: true });
+  if (lastTake === file) lastTake = null;
 }
 
 function recordingName() {
@@ -707,6 +741,10 @@ async function addMarker(key, reset) {
 }
 
 function playAnimation() {
+  if (recordReload) {
+    queuedPlay = true;
+    return;
+  }
   const { stops } = trackFor(animationKey());
   if (!stops.length) return showToast('No animation for this page · ⌘.');
   hideOverlay();
@@ -773,6 +811,8 @@ function buildMenu() {
         { label: 'Record / Stop', accelerator: 'CmdOrCtrl+E', click: toggleRecording },
         { label: 'Recording Window', accelerator: 'Alt+CmdOrCtrl+E', click: toggleRecorder },
         { type: 'separator' },
+        { label: 'Edit Last Recording', click: () => (lastTake && fs.existsSync(lastTake) ? openEditor(lastTake) : showToast('No recording to edit · ⌘E')) },
+        { label: 'Open Recording…', accelerator: 'CmdOrCtrl+O', click: openRecordingDialog },
         { label: 'Reveal Last Recording', click: revealLastRecording },
         {
           label: 'Open Recordings Folder',
@@ -886,6 +926,16 @@ function createWindow() {
   win.on('closed', () => {
     if (recorderOpen()) recorder.destroy();
     if (animator && !animator.isDestroyed()) animator.destroy();
+    // Unsaved takes stay on disk, to open again later.
+    for (const ed of editors.values()) {
+      if (ed.out) {
+        try {
+          fs.closeSync(ed.out.fd);
+        } catch {}
+        fs.rmSync(ed.out.tmp, { force: true });
+      }
+      if (!ed.win.isDestroyed()) ed.win.destroy();
+    }
   });
 
   const wc = page.webContents;
@@ -930,6 +980,14 @@ function createWindow() {
     sendToRecorder('rec:event', { type: 'nav', label: label.length > 40 ? `${label.slice(0, 39)}…` : label });
   });
   wc.on('did-finish-load', () => sendToRecorder('rec:event', { type: 'load', label: 'Loaded' }));
+  wc.on('did-finish-load', () => recordReload && recordReload.issued && afterRecordReload());
+  wc.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3 && recordReload && recordReload.issued) afterRecordReload(); // -3: aborted by another navigation
+  });
+  // Leaving the page ends its animation; the page can't say so itself.
+  wc.on('did-start-navigation', (e) => {
+    if (e.isMainFrame && !e.isSameDocument && animPlaying) animProgress({ playing: false });
+  });
   wc.on('did-finish-load', () => sendToAnimator('anim:page-changed'));
   wc.on('did-navigate-in-page', () => sendToAnimator('anim:page-changed'));
   wc.on('did-finish-load', invalidatePreview);
@@ -1008,7 +1066,17 @@ ipcMain.on('anim:play', playAnimation);
 ipcMain.on('anim:close', () => animator && animator.close());
 ipcMain.on('anim:stop', () => page.webContents.send('anim:stop'));
 ipcMain.on('anim:seek', (_e, y) => page.webContents.send('anim:seek', y));
-ipcMain.on('anim:progress', (_e, data) => {
+// The recording's reload has finished loading: play the animation if it was
+// asked for meanwhile, or if recordings start it.
+function afterRecordReload() {
+  recordReload = null;
+  if (!queuedPlay && !store.playOnRecord) return;
+  queuedPlay = false;
+  setTimeout(() => recordingActive && playAnimation(), PLAY_AFTER_LOAD);
+}
+
+ipcMain.on('anim:progress', (_e, data) => animProgress(data));
+function animProgress(data) {
   sendToAnimator('anim:progress', data);
   // The recorder times the pointer's cursor spans off playback.
   const anim = { playing: !!data.playing, elapsed: data.elapsed || 0 };
@@ -1018,16 +1086,16 @@ ipcMain.on('anim:progress', (_e, data) => {
     animPlaying = !!data.playing;
     sendToRecorder('rec:event', { type: animPlaying ? 'anim-start' : 'anim-end', label: animPlaying ? 'Animation' : '' });
   }
-});
+}
 
 // ---- Recording -------------------------------------------------------------
 // The pane captures the page's WebContents (tab capture, so nothing but the
 // page is in the footage) and streams a finished MP4 here, chunk by chunk.
 ipcMain.on('rec:toggle', toggleRecording);
 ipcMain.on('rec:close-pane', closeRecorder);
-ipcMain.on('rec:reveal', revealLastRecording);
 ipcMain.handle('rec:init', () => ({
   reload: store.reloadOnRecord !== false,
+  play: !!store.playOnRecord,
   height: store.recordHeight || 'native',
   blur: store.motionBlur || 0,
   viewport: viewportPixels(),
@@ -1054,6 +1122,10 @@ ipcMain.on('rec:cursor-image', (e, img) => {
   sendToRecorder('rec:cursor-image', img);
   sendToLiveCursor('live:cursor-image', img);
 });
+ipcMain.on('rec:set-play', (_e, on) => {
+  store.playOnRecord = !!on;
+  save();
+});
 ipcMain.on('rec:set-reload', (_e, on) => {
   store.reloadOnRecord = !!on;
   save();
@@ -1070,9 +1142,9 @@ ipcMain.handle('rec:source', () => {
 ipcMain.handle('rec:open', () => {
   if (recording) return { error: 'Already recording' };
   try {
-    fs.mkdirSync(recordingsDir(), { recursive: true });
+    fs.mkdirSync(takesDir(), { recursive: true });
     const name = recordingName();
-    const file = path.join(recordingsDir(), name);
+    const file = path.join(takesDir(), name);
     recording = { fd: fs.openSync(file, 'w'), path: file, name };
     return { path: file, name };
   } catch (err) {
@@ -1100,7 +1172,7 @@ function finishRecording(keep) {
     fs.rmSync(rec.path, { force: true });
     return null;
   }
-  lastRecording = rec.path;
+  lastTake = rec.path;
   return rec;
 }
 
@@ -1108,9 +1180,16 @@ function afterRecording() {
   if (closingForRecording) setTimeout(() => win.close(), 50);
 }
 
-ipcMain.handle('rec:finish', (_e, stats) => {
+ipcMain.handle('rec:finish', (_e, stats, take) => {
   const rec = finishRecording(true);
-  if (rec) showToast(`Saved · ${rec.name}`);
+  if (rec && take) {
+    try {
+      fs.writeFileSync(sidecarPath(rec.path), JSON.stringify({ version: 1, name: rec.name, ...take }));
+    } catch (err) {
+      console.error('take sidecar write failed', err);
+    }
+  }
+  if (rec && closingForRecording) showToast(`Kept in Unsaved · ${rec.name}`);
   if (process.env.DARC_SMOKE) console.log(JSON.stringify({ saved: rec && rec.path, ...stats }));
   afterRecording();
   return rec ? { path: rec.path, name: rec.name } : { error: 'No file open' };
@@ -1118,11 +1197,17 @@ ipcMain.handle('rec:finish', (_e, stats) => {
 
 // The pane discarded a recording just after it was saved.
 ipcMain.handle('rec:discard', (_e, file) => {
-  if (!file || file !== lastRecording) return false;
-  fs.rmSync(file, { force: true });
-  lastRecording = null;
+  if (!file || file !== lastTake) return false;
+  removeTake(file);
   showToast('Recording discarded');
   return true;
+});
+
+// Open the last recording in the editor.
+ipcMain.on('rec:edit', () => {
+  if (closingForRecording) return;
+  if (lastTake && fs.existsSync(lastTake)) openEditor(lastTake);
+  else showToast('No recording to edit · ⌘E');
 });
 
 ipcMain.handle('rec:cancel', (_e, discarded) => {
@@ -1137,9 +1222,256 @@ ipcMain.handle('rec:cancel', (_e, discarded) => {
 // Chromium restores the scroll position across a reload.
 ipcMain.on('rec:reload', async () => {
   const wc = page.webContents;
+  if (recordReload) recordReload.issued = true;
   await wc.executeJavaScript('window.scrollTo(0, 0)', true).catch(() => {});
   pendingReload = true;
   wc.reload();
+});
+
+// ---- Editor ----------------------------------------------------------------
+// Each recording opens in an editor window to preview it, trim it and tweak
+// the cursor before it's saved to the recordings folder. Saving re-encodes
+// the take with the cursor drawn on; until then it waits in Unsaved.
+const editors = new Map(); // webContents id -> { win, file, dirty, saved, out }
+
+function editorFor(sender) {
+  return editors.get(sender.id);
+}
+
+function editorBounds() {
+  const area = screen.getDisplayMatching(win.getBounds()).workArea;
+  const width = Math.min(1280, area.width - 80);
+  const height = Math.min(860, area.height - 80);
+  return { x: Math.round(area.x + (area.width - width) / 2), y: Math.round(area.y + (area.height - height) / 2), width, height };
+}
+
+function openEditor(file) {
+  for (const ed of editors.values()) {
+    if (ed.file === file && !ed.win.isDestroyed()) return ed.win.focus();
+  }
+  const ed = { file, dirty: isTake(file), saved: null, out: null };
+  ed.win = new BrowserWindow({
+    ...editorBounds(),
+    minWidth: 760,
+    minHeight: 520,
+    title: path.basename(file),
+    frame: false,
+    roundedCorners: false,
+    hasShadow: true,
+    backgroundColor: '#0b0b0b',
+    webPreferences: {
+      preload: path.join(__dirname, 'editor-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false, // saving keeps going behind other windows
+    },
+  });
+  const id = ed.win.webContents.id;
+  editors.set(id, ed);
+  ed.win.loadFile(path.join(__dirname, 'editor.html'));
+  ed.win.on('close', (e) => {
+    if (ed.out) {
+      e.preventDefault();
+      ed.win.webContents.send('edit:busy');
+      return;
+    }
+    if (ed.force) return;
+    if (!ed.dirty) {
+      if (isTake(file) && ed.saved) removeTake(file);
+      return;
+    }
+    e.preventDefault();
+    const take = isTake(file);
+    const buttons = take ? ['Discard', 'Keep in Unsaved', 'Cancel'] : ['Close', 'Cancel'];
+    const choice = dialog.showMessageBoxSync(ed.win, {
+      type: 'question',
+      message: take ? (ed.saved ? 'Discard your latest changes?' : 'Discard this recording?') : 'Close without saving?',
+      detail: take
+        ? (ed.saved ? 'The saved video stays as it is. Keep the recording to carry on later from Record › Open Recording…' : "It hasn't been saved yet. Keep it to finish it later from Record › Open Recording…")
+        : 'Your edits will be lost.',
+      buttons,
+      defaultId: buttons.length - 1,
+      cancelId: buttons.length - 1,
+    });
+    if (buttons[choice] === 'Cancel') return;
+    if (buttons[choice] === 'Discard') removeTake(file);
+    ed.force = true;
+    ed.win.close();
+  });
+  ed.win.on('closed', () => editors.delete(id));
+  if (process.env.DARC_SMOKE) smokeEditor(ed);
+}
+
+// Where Save writes: the recordings folder, under the take's name.
+function outputPath(ed) {
+  const out = path.join(recordingsDir(), path.basename(ed.file));
+  return out === ed.file ? out.replace(/\.mp4$/i, ' edited.mp4') : out;
+}
+
+async function openRecordingDialog() {
+  const parent = BrowserWindow.getFocusedWindow() || win;
+  const takes = takesDir();
+  const { canceled, filePaths } = await dialog.showOpenDialog(parent, {
+    title: 'Open a recording',
+    defaultPath: fs.existsSync(takes) ? takes : recordingsDir(),
+    filters: [{ name: 'Videos', extensions: ['mp4'] }],
+    properties: ['openFile'],
+  });
+  if (!canceled && filePaths.length) openEditor(filePaths[0]);
+}
+
+ipcMain.handle('edit:init', (e) => {
+  const ed = editorFor(e.sender);
+  if (!ed) return { error: 'No recording' };
+  try {
+    const index = readMp4Index(ed.file);
+    let take = null;
+    try {
+      take = JSON.parse(fs.readFileSync(sidecarPath(ed.file), 'utf8'));
+    } catch {}
+    // Typed arrays clone over IPC far faster than an array of objects.
+    const n = index.samples.length;
+    const samples = { offset: new Float64Array(n), size: new Uint32Array(n), dts: new Float64Array(n), pts: new Float64Array(n), key: new Uint8Array(n) };
+    index.samples.forEach((s, i) => {
+      samples.offset[i] = s.offset;
+      samples.size[i] = s.size;
+      samples.dts[i] = s.dts;
+      samples.pts[i] = s.pts;
+      samples.key[i] = s.key ? 1 : 0;
+    });
+    return {
+      url: pathToFileURL(ed.file).href,
+      name: path.basename(ed.file),
+      output: path.basename(outputPath(ed)),
+      isTake: isTake(ed.file),
+      take,
+      index: { codec: index.codec, width: index.width, height: index.height, duration: index.duration, description: new Uint8Array(index.description), samples },
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+// Sample data for the decoder, by byte range.
+ipcMain.handle('edit:read', (e, position, length) => {
+  const ed = editorFor(e.sender);
+  if (!ed) return null;
+  const fd = fs.openSync(ed.file, 'r');
+  try {
+    const buf = Buffer.alloc(length);
+    const n = fs.readSync(fd, buf, 0, length, position);
+    return new Uint8Array(buf.buffer, buf.byteOffset, n);
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+
+// Edits are kept in the take's sidecar, so a take kept for later reopens as it was left.
+ipcMain.on('edit:state', (e, edits, dirty) => {
+  const ed = editorFor(e.sender);
+  if (!ed) return;
+  ed.dirty = !!dirty;
+  if (!isTake(ed.file) || !edits) return;
+  clearTimeout(ed.stateTimer);
+  ed.stateTimer = setTimeout(() => {
+    try {
+      const side = sidecarPath(ed.file);
+      const take = JSON.parse(fs.readFileSync(side, 'utf8'));
+      fs.writeFileSync(side, JSON.stringify({ ...take, edits }));
+    } catch {}
+  }, 400);
+});
+
+// Saving: the editor streams the re-encoded MP4 here, written beside the
+// final name and moved into place once it's complete.
+ipcMain.handle('edit:open-output', (e) => {
+  const ed = editorFor(e.sender);
+  if (!ed || ed.out) return { error: 'Already saving' };
+  try {
+    fs.mkdirSync(recordingsDir(), { recursive: true });
+    const file = outputPath(ed);
+    const tmp = path.join(path.dirname(file), `.${path.basename(file)}.part`);
+    ed.out = { fd: fs.openSync(tmp, 'w'), tmp, path: file };
+    return { name: path.basename(file) };
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.on('edit:write', (e, position, data) => {
+  const ed = editorFor(e.sender);
+  if (!ed || !ed.out) return;
+  try {
+    fs.writeSync(ed.out.fd, data, 0, data.byteLength, position);
+  } catch (err) {
+    console.error('editor write failed', err);
+  }
+});
+
+function savedOutput(ed, file) {
+  ed.saved = file;
+  ed.dirty = false;
+  lastRecording = file;
+  showToast(`Saved · ${path.basename(file)}`);
+  if (process.env.DARC_SMOKE) console.log(JSON.stringify({ exported: file }));
+  return { path: file, name: path.basename(file) };
+}
+
+ipcMain.handle('edit:finish-output', (e, keep) => {
+  const ed = editorFor(e.sender);
+  if (!ed || !ed.out) return { error: 'Not saving' };
+  const out = ed.out;
+  ed.out = null;
+  try {
+    fs.closeSync(out.fd);
+  } catch {}
+  if (!keep) {
+    fs.rmSync(out.tmp, { force: true });
+    return null;
+  }
+  try {
+    fs.renameSync(out.tmp, out.path);
+    return savedOutput(ed, out.path);
+  } catch (err) {
+    fs.rmSync(out.tmp, { force: true });
+    return { error: err.message };
+  }
+});
+
+// Nothing to draw and nothing trimmed: the take is saved as it is, a clone of
+// the file rather than a re-encode.
+ipcMain.handle('edit:copy', (e) => {
+  const ed = editorFor(e.sender);
+  if (!ed || ed.out) return { error: 'Already saving' };
+  try {
+    fs.mkdirSync(recordingsDir(), { recursive: true });
+    const file = outputPath(ed);
+    fs.copyFileSync(ed.file, file, fs.constants.COPYFILE_FICLONE);
+    return savedOutput(ed, file);
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.on('edit:discard', (e) => {
+  const ed = editorFor(e.sender);
+  if (!ed || ed.out) return;
+  if (isTake(ed.file)) {
+    removeTake(ed.file);
+    showToast('Recording discarded');
+  }
+  ed.force = true;
+  ed.win.close();
+});
+
+ipcMain.on('edit:reveal', (e) => {
+  const ed = editorFor(e.sender);
+  if (ed && ed.saved && fs.existsSync(ed.saved)) shell.showItemInFolder(ed.saved);
+});
+
+ipcMain.on('edit:close', (e) => {
+  const ed = editorFor(e.sender);
+  if (ed) ed.win.close();
 });
 
 app.whenReady().then(() => {
@@ -1202,6 +1534,7 @@ function smokeTest(url) {
   const orig = afterRecording;
   afterRecording = () => {
     orig();
+    if (process.env.DARC_SMOKE_EDIT) return; // smokeEditor takes it from here
     setTimeout(async () => {
       if (process.env.DARC_SMOKE_SHOT && recorderOpen()) {
         const img = await recorder.webContents.capturePage();
@@ -1210,6 +1543,27 @@ function smokeTest(url) {
       app.exit(0);
     }, 600);
   };
+}
+
+// DARC_SMOKE_EDIT=1 carries the smoke test on into the editor:
+// DARC_SMOKE_EDIT_JS runs in it first, DARC_SMOKE_EDIT_SHOT=<png> screenshots
+// it, and DARC_SMOKE_EXPORT=1 saves the video before quitting.
+function smokeEditor(ed) {
+  if (!process.env.DARC_SMOKE_EDIT) return;
+  const wc = ed.win.webContents;
+  wc.on('console-message', (e) => console.log(`[editor] ${e.message}`));
+  wc.once('did-finish-load', () => {
+    setTimeout(async () => {
+      const run = (js) => wc.executeJavaScript(js, true).catch((err) => console.log('smoke editor js', err.message));
+      if (process.env.DARC_SMOKE_EDIT_JS) {
+        await run(process.env.DARC_SMOKE_EDIT_JS);
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      if (process.env.DARC_SMOKE_EDIT_SHOT) fs.writeFileSync(process.env.DARC_SMOKE_EDIT_SHOT, (await wc.capturePage()).toPNG());
+      if (process.env.DARC_SMOKE_EXPORT) console.log(JSON.stringify({ export: await run('save()') }));
+      app.exit(0);
+    }, 2000);
+  });
 }
 
 app.on('window-all-closed', () => app.quit());

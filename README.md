@@ -70,7 +70,7 @@ Animations are saved per page (origin + path).
 
 ## Cursor
 
-Tab capture has no pointer in it, so Darc draws one into the footage from where the mouse is over the page. The **Cursor** section of the animation panel has the settings (they apply to every recording):
+Tab capture has no pointer in it, so Darc draws one into the footage from where the mouse is over the page. It's added when a recording is saved from the editor (see below), which can change it per video; the **Cursor** section of the animation panel sets the defaults each recording starts with:
 
 - **Page's cursor** follows the CSS `cursor` under the mouse: arrow, pointing hand over links, I-beam over text, and image cursors (`cursor: url(...)`) as the page defines them. Pages that hide the cursor to draw their own (`cursor: none`) are left to it, since theirs is already in the capture. **Arrow** always draws the arrow, and **Custom image** draws a PNG/SVG of your own with the hotspot at its top-left corner or center.
 - **Smoothing** is how long the drawn pointer takes to settle on the real one, so hand movement reads as deliberate; **Damping** below 1 lets it overshoot a little, above 1 makes it trail. The box under the sliders lets you try the feel.
@@ -83,13 +83,25 @@ Tab capture has no pointer in it, so Darc draws one into the footage from where 
 ⌘E starts recording and opens the recording window docked under the browser (it also opens with the animation panel, so output settings can be set first). Press it again (or Stop) to finish.
 
 - Footage is the page only: the window chrome, toasts and the recording window never appear. It's a constant 60 fps at the resolution picked in the dropdown: **native** is the viewport's physical size (2× on Retina, so a 1920×1080 window records 3840×2160), and the other options downscale it in the viewport's aspect ratio. 1× is the sharpest choice for a matching-size video; native above 4K can drop frames while scrolling, and the recording window counts any drops.
-- The pointer, if it's on, is drawn on after motion blur so it stays sharp (see Cursor above).
+- The pointer isn't in the recording itself: Darc logs where the mouse was, and the editor draws it on after motion blur, so it stays sharp and can still be changed (see Cursor above).
 - **Motion blur** (off by default) smears the footage along the direction of scrolling like a camera shutter would, with subtle / normal / strong (45° / 90° / 180°) settings. It's applied only to the recording, never to the live page, and pixels that don't move (sticky headers, fixed UI) stay sharp.
-- Encoded in hardware as H.264, or HEVC when the viewport is too large for H.264. Files are standard MP4s, saved to `~/Movies/Darc/` and written to disk as they record, so length is only limited by disk space.
+- Encoded in hardware as H.264, or HEVC when the viewport is too large for H.264. Recordings are written to disk as they record (to `~/Movies/Darc/Unsaved/` until they're saved from the editor), so length is only limited by disk space.
 - **Reload page** (on by default) reloads from the top as recording starts, so the page's load animations play again on camera.
+- **Play animation** plays the page's scroll animation as recording starts: 0.25 s after the reloaded page loads, or straight away without a reload. Pressing space (or ⌘↩) while the reload is still under way also waits for the page to load before playing.
 - Recording keeps going while you scroll, follow links and navigate. The timeline marks reloads, navigations, page loads and scroll-animation playback.
 - **▶ Animation** plays the page's scroll animation from the recording window; the ● Rec button in the animation panel starts a recording.
 - **Discard** throws a take away: while recording it stops without keeping anything, and while saving it cancels the save and deletes the file.
-- Closing the browser mid-recording finishes writing the file first.
+- Closing the browser mid-recording finishes writing the file first and keeps it in Unsaved.
 
-`DARC_SMOKE=<url> npm start` records the page for a few seconds and prints the result, for checking the pipeline.
+## Editor
+
+Stopping a recording opens it in the editor instead of saving it straight away. Nothing lands in `~/Movies/Darc/` until you press **Save** (⌘S).
+
+- The video plays with the cursor drawn over it, exactly as it will be saved. Space plays the kept part, ← / → step a frame (⇧ for a second), and clicking or dragging the ruler or Video track scrubs.
+- **Cursor**: change its style (page's cursor, arrow, custom image or off), size, smoothing and damping for this video. The Cursor track shows when it's visible, starting out as when it would have shown while recording; drag on the track to add a span, drag a span to move it or its edges to resize it, ⌫ to remove one. **As recorded / Always / Never** reset the spans.
+- **Trim**: drag the yellow handles on the Video track, type the start and end, or press I and O to start or end at the playhead.
+- ⌘Z / ⇧⌘Z undo and redo any edit. Edits are kept with the recording, so one kept for later reopens as it was left.
+- **Save** re-encodes the kept part with the cursor drawn on, to `~/Movies/Darc/` under the recording's name (saving again replaces it). With the cursor hidden throughout and nothing trimmed, the recording is copied as it is instead. **Discard** throws the recording away (press it twice).
+- Closing the editor without saving asks whether to discard the recording or keep it in Unsaved; **Record › Open Recording…** (⌘O) opens it again later, and also opens other MP4s for trimming. **Record › Edit Last Recording** brings back the last one.
+
+`DARC_SMOKE=<url> npm start` records the page for a few seconds and prints the result, for checking the pipeline. Add `DARC_SMOKE_EDIT=1` to carry on into the editor, with `DARC_SMOKE_EDIT_JS` (run in it), `DARC_SMOKE_EDIT_SHOT=<png>` (screenshot it) and `DARC_SMOKE_EXPORT=1` (save the video).

@@ -52,8 +52,8 @@
   .stats b { color: #999; font-weight: 500; }
   .stats.error { color: #ff8a8a; }
   .spacer { flex: 1; min-width: 0; }
-  #reveal { display: none; }
-  body.saved #reveal { display: block; }
+  #edit { display: none; }
+  body.saved #edit { display: block; }
   #discard { display: none; }
   body.recording #discard, body.stopping #discard { display: block; }
   #close { color: #555; font-size: 18px; line-height: 1; padding: 0 4px; }
@@ -68,6 +68,7 @@
 <div class="bar">
   <button class="btn" id="record" title="Record the page (⌘E)"><span class="dot"></span><span class="label">Record</span></button>
   <label class="reload" title="Reload the page as recording starts so its load animations play again"><input type="checkbox" id="reload"> Reload page</label>
+  <label class="reload" title="Play the page's scroll animation as recording starts, 0.25 s after the reloaded page loads"><input type="checkbox" id="play"> Play animation</label>
   <select class="sel" id="res" title="Output resolution"></select>
   <select class="sel" id="blur" title="Motion blur while the page scrolls, added to the footage only">
     <option value="0">No motion blur</option>
@@ -81,14 +82,12 @@
   <span class="spacer"></span>
   <button class="btn" id="discard" title="Stop without keeping the recording, or stop saving it">Discard</button>
   <button class="btn" id="anim" title="Play the page's scroll animation (⌘↩)">▶ Animation</button>
-  <button class="btn" id="reveal" title="Show the recording in Finder">Reveal</button>
+  <button class="btn" id="edit" title="Preview, trim and set the cursor, then save">Edit</button>
   <button id="close" title="Close (⌥⌘E)">×</button>
 </div>
 <div id="timeline"><canvas id="canvas"></canvas></div>
 
 <script src="vendor/mp4-muxer.js"></script>
-<script src="cursor-shapes.js"></script>
-<script src="cursor-layer.js"></script>
 <script>
   const FPS = 60;
   const $ = (id) => document.getElementById(id);
@@ -101,7 +100,9 @@
   let plan = null; // encoder plan for the current/last recording
   let viewport = null; // { width, height, css } physical size of the page view
   let prefHeight = 'native'; // chosen output height, or 'native'
-  let cursorSettings = { mode: 'off' }; // pointer overlay settings, from the animation panel
+  // The cursor isn't drawn into the take: the editor adds it on save, from the
+  // pointer and animation playback logged here and these settings.
+  let cursorSettings = { mode: 'off' }; // pointer settings, from the animation panel
   let cursorSpans = []; // when the pointer shows during this page's animation, [{ start, end }] ms
   let lastPointer = null; // latest mouse position over the page
   let animProgress = { playing: false, elapsed: 0 };
@@ -164,7 +165,7 @@
     document.body.classList.toggle('stopping', s === 'stopping');
     $('record').querySelector('.label').textContent = s === 'recording' ? 'Stop' : s === 'stopping' ? 'Saving…' : s === 'starting' ? 'Starting…' : 'Record';
     $('close').disabled = s === 'recording' || s === 'stopping' || s === 'starting';
-    $('res').disabled = $('blur').disabled = $('reload').disabled = s !== 'idle' && s !== 'saved';
+    $('res').disabled = $('blur').disabled = $('reload').disabled = $('play').disabled = s !== 'idle' && s !== 'saved';
     narc.state(s === 'recording' || s === 'starting' || s === 'stopping');
   }
 
@@ -179,11 +180,10 @@
       const s = session;
       const drop = s.dropped ? ` · <b>${s.dropped}</b> dropped` : '';
       const blur = s.blur ? ` · blur ${s.motion.shutter}°` : '';
-      const cursor = s.cursor && s.cursor.settings.mode !== 'off' ? ' · cursor' : '';
-      status(`<b>${plan.width}×${plan.height}</b> · ${FPS} fps · ${plan.label}${blur}${cursor} · <b>${fmtBytes(s.bytes)}</b>${drop}`);
+      status(`<b>${plan.width}×${plan.height}</b> · ${FPS} fps · ${plan.label}${blur} · <b>${fmtBytes(s.bytes)}</b>${drop}`);
     } else if (state === 'saved' && result) {
       const drop = result.dropped ? ` · ${result.dropped} dropped` : '';
-      status(`Saved <b>${result.name}</b> · ${result.width}×${result.height} · ${fmtBytes(result.bytes)}${drop}`);
+      status(`Recorded <b>${result.name}</b> · ${result.width}×${result.height}${drop} · save it from the editor`);
     }
   }
 
@@ -436,16 +436,13 @@
   // 1/60 s the newest frame is encoded, so the file is constant-frame-rate even
   // though the capturer only emits frames when the page repaints.
   class Session {
-    constructor(stream, plan, motion, cursor) {
+    constructor(stream, plan, motion) {
       this.stream = stream;
       this.plan = plan;
       this.motion = motion; // { shutter (degrees), scale (output px per CSS px) } or null
-      this.cursor = cursor ? new CursorLayer(cursor, plan.width, plan.height) : null;
-      if (this.cursor) {
-        // Frames pass through a 2D canvas to get the pointer drawn on.
-        this.compose = new OffscreenCanvas(plan.width, plan.height);
-        this.composeCtx = this.compose.getContext('2d', { alpha: false, desynchronized: true });
-      }
+      // The pointer and animation playback over time, in seconds of video,
+      // for the editor to draw the cursor from. Shapes are stored once each.
+      this.cursorLog = { pointer: [], anim: [], shapes: [], shapeIds: new Map() };
       this.vel = { vx: 0, vy: 0 }; // CSS px/s, smoothed
       this.samples = []; // recent raw velocity samples
       this.serial = 0; // bumps when a new frame arrives
@@ -463,6 +460,8 @@
       this.stopping = null;
       this.aborted = false; // discarded: nothing is kept
       this.started = performance.now();
+      if (lastPointer) this.logPointer(lastPointer);
+      this.logAnim(animProgress);
       this.timer = setInterval(() => this.tick(), 4);
       this.reader = new MediaStreamTrackProcessor({ track: this.track }).readable.getReader();
       this.pump();
@@ -471,6 +470,44 @@
 
     elapsed() {
       return (performance.now() - this.started) / 1000;
+    }
+
+    logPointer(p) {
+      const log = this.cursorLog;
+      const shape = p.shape || { type: 'default' };
+      const key = JSON.stringify(shape);
+      if (!log.shapeIds.has(key)) {
+        log.shapeIds.set(key, log.shapes.length);
+        log.shapes.push(shape);
+      }
+      const r = (v) => Math.round(v * 1e5) / 1e5;
+      log.pointer.push([r(this.elapsed()), r(p.x), r(p.y), p.inside ? 1 : 0, log.shapeIds.get(key)]);
+    }
+
+    logAnim(p) {
+      this.cursorLog.anim.push([Math.round(this.elapsed() * 1e4) / 1e4, p.playing ? 1 : 0, Math.round(p.elapsed || 0)]);
+    }
+
+    // What the editor needs alongside the video.
+    take() {
+      const { pointer, anim, shapes } = this.cursorLog;
+      return {
+        fps: FPS,
+        width: this.plan.width,
+        height: this.plan.height,
+        config: this.plan.config,
+        events,
+        animSpans: spans,
+        cursor: {
+          settings: cursorSettings,
+          spans: cursorSpans,
+          scale: this.plan.width / viewport.css.width,
+          images: [...cursorImageData],
+          pointer,
+          anim,
+          shapes,
+        },
+      };
     }
 
     async pump() {
@@ -591,20 +628,13 @@
             this.blur.upload(this.latest);
             this.uploaded = this.serial;
           }
-          // With blur or the cursor on, every frame goes through the canvas
-          // passes (even when still), so the encoder sees one frame format
-          // from the start.
+          // With blur on, every frame goes through the blur pass (even when
+          // still), so the encoder sees one frame format from the start.
           let source = this.latest;
           if (this.blur) {
             const [dx, dy] = this.smear();
             source = this.blur.render(dx, dy);
             if (Math.hypot(dx, dy) >= 0.75) this.blurred++;
-          }
-          if (this.cursor) {
-            this.cursor.step(1 / FPS);
-            this.composeCtx.drawImage(source, 0, 0, this.plan.width, this.plan.height);
-            this.cursor.draw(this.composeCtx);
-            source = this.compose;
           }
           f = new VideoFrame(source, timing);
         } catch (err) {
@@ -674,7 +704,7 @@
           await narc.cancel(this.aborted);
           return null;
         }
-        const saved = await narc.finish({ seconds, bytes: this.bytes, frames: this.encoded, dropped: this.dropped });
+        const saved = await narc.finish({ seconds, bytes: this.bytes, frames: this.encoded, dropped: this.dropped }, this.take());
         if (this.aborted) {
           // Discarded while the file was being closed: delete it after all.
           await narc.discard(saved.path);
@@ -720,14 +750,15 @@
       if (file.error) throw new Error(file.error);
       const shutter = +$('blur').value;
       const scale = plan.width / src.css.width;
-      const cursor = cursorSettings.mode !== 'off'
-        ? { settings: cursorSettings, spans: cursorSpans, scale, images: cursorImageData, pointer: lastPointer, anim: animProgress }
-        : null;
-      session = new Session(stream, plan, shutter > 0 ? { shutter, scale } : null, cursor);
+      session = new Session(stream, plan, shutter > 0 ? { shutter, scale } : null);
       setState('recording');
+      // With a reload, the main process plays the animation once the page has
+      // loaded again.
       if ($('reload').checked) {
         narc.reload();
         mark('reload', 'Reload');
+      } else if ($('play').checked) {
+        setTimeout(() => state === 'recording' && narc.playAnimation(), 250);
       }
     } catch (err) {
       if (stream) for (const t of stream.getTracks()) t.stop();
@@ -748,6 +779,7 @@
     if (saved) {
       result = saved;
       setState('saved');
+      narc.edit();
     } else {
       setState('idle');
       if (s.aborted) status('Recording discarded');
@@ -763,10 +795,14 @@
   }
 
   $('record').addEventListener('click', toggle);
-  $('reveal').addEventListener('click', () => narc.reveal());
+  $('edit').addEventListener('click', () => narc.edit());
   $('discard').addEventListener('click', () => stop(true));
   $('close').addEventListener('click', () => narc.close());
   $('anim').addEventListener('click', () => (animPlaying ? narc.stopAnimation() : narc.playAnimation()));
+  $('play').addEventListener('change', () => {
+    narc.setPlay($('play').checked);
+    $('play').blur();
+  });
   $('reload').addEventListener('change', () => {
     narc.setReload($('reload').checked);
     $('reload').blur();
@@ -782,26 +818,21 @@
   });
   narc.onToggle(toggle);
   narc.onVelocity((v) => session && session.setVelocity(v));
-  const layer = () => session && session.cursor;
+  const logging = () => state === 'recording' && session;
   narc.onPointer((p) => {
     lastPointer = p;
-    if (layer()) layer().pointer(p);
+    if (logging()) session.logPointer(p);
   });
-  narc.onCursorImage((img) => {
-    cursorImageData.set(img.id, img.data);
-    if (layer()) layer().image(img);
-  });
+  narc.onCursorImage((img) => cursorImageData.set(img.id, img.data));
   narc.onCursor((c) => {
     cursorSettings = c;
-    if (layer()) layer().configure(c);
   });
-  narc.onCursorSpans((spans) => {
-    cursorSpans = spans || [];
-    if (layer()) layer().setSpans(cursorSpans);
+  narc.onCursorSpans((s) => {
+    cursorSpans = s || [];
   });
   narc.onAnimProgress((p) => {
     animProgress = p;
-    if (layer()) layer().progress(p);
+    if (logging()) session.logAnim(p);
   });
   narc.onStop(stop);
 
@@ -811,6 +842,7 @@
 
   narc.init().then((data) => {
     $('reload').checked = data.reload !== false;
+    $('play').checked = !!data.play;
     prefHeight = data.height || 'native';
     $('blur').value = String([0, 45, 90, 180].includes(+data.blur) ? +data.blur : 0);
     cursorSettings = data.cursor || cursorSettings;

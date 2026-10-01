@@ -1,0 +1,1043 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src file:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Edit</title>
+<style>
+  * { box-sizing: border-box; margin: 0; border-radius: 0 !important; }
+  html, body { height: 100%; overflow: hidden; background: #0b0b0b; }
+  body {
+    display: flex; flex-direction: column;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    color: #ededed;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  html { border: 1px solid #2a2a2a; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  input, select { font: inherit; color: inherit; }
+
+  header {
+    flex: none; height: 44px; padding: 0 12px 0 16px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid #1f1f1f;
+    -webkit-app-region: drag;
+  }
+  header h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+  header .meta { color: #666; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  header .status { flex: 1; min-width: 0; color: #888; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  header .status b { color: #ddd; font-weight: 500; }
+  header .status.error { color: #ff8a8a; }
+  header button { -webkit-app-region: no-drag; }
+  .btn { padding: 5px 10px; border: 1px solid #333; color: #bbb; white-space: nowrap; }
+  .btn:hover { color: #fff; border-color: #555; }
+  .btn:disabled { opacity: 0.35; pointer-events: none; }
+  .btn.confirm { color: #ff4d2e; border-color: #ff4d2e; }
+  .btn.primary { background: #fff; color: #000; border-color: #fff; min-width: 64px; }
+  .btn.primary:hover { background: #ddd; }
+  .btn.sm { padding: 2px 8px; font-size: 12px; }
+  #reveal { display: none; }
+  body.saved #reveal { display: block; }
+  #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
+  #close:hover { color: #fff; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage { flex: 1; min-width: 0; position: relative; background: #050505; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #frame { position: relative; outline: 1px solid #1f1f1f; background: #000; }
+  #frame video { display: block; width: 100%; height: 100%; }
+  #frame canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #555; text-align: center; padding: 24px; white-space: pre-line; }
+
+  aside { flex: none; width: 300px; display: flex; flex-direction: column; border-left: 1px solid #1f1f1f; overflow-y: auto; }
+  aside::-webkit-scrollbar { width: 0; }
+  section { padding: 12px 16px 14px; border-bottom: 1px solid #1a1a1a; }
+  section h2 { font-size: 12px; font-weight: 600; color: #bbb; display: flex; gap: 8px; }
+  section h2 .sub { color: #555; font-weight: 400; flex: 1; text-align: right; font-variant-numeric: tabular-nums; }
+  .field { display: grid; grid-template-columns: 72px 1fr 72px; gap: 10px; align-items: center; margin-top: 8px; }
+  .field label { color: #888; }
+  .field .val { color: #bbb; font-variant-numeric: tabular-nums; }
+  .num {
+    width: 100%; padding: 3px 6px; background: #0b0b0b; border: 1px solid #2a2a2a; outline: 0;
+    text-align: right; font-variant-numeric: tabular-nums; user-select: text;
+  }
+  .num:focus { border-color: #555; }
+  select { grid-column: 2 / -1; width: 100%; padding: 4px 6px; background: #0b0b0b; border: 1px solid #2a2a2a; outline: 0; }
+  .row { grid-column: 2 / -1; display: flex; gap: 6px; }
+  .row .btn { flex: 1; padding: 2px 4px; }
+  .note { margin-top: 10px; color: #555; font-size: 11px; }
+  body.no-cursor .cursor-only { display: none; }
+  body:not(.no-cursor) .no-cursor-only { display: none; }
+
+  input[type=range] { -webkit-appearance: none; width: 100%; height: 16px; background: transparent; }
+  input[type=range]::-webkit-slider-runnable-track { height: 2px; background: #333; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; background: #fff; border: 0; }
+  input[type=range]:focus { outline: none; }
+
+  footer { flex: none; border-top: 1px solid #1f1f1f; }
+  .transport { height: 36px; padding: 0 16px; display: flex; align-items: center; gap: 12px; }
+  #play { width: 28px; height: 24px; border: 1px solid #333; color: #ddd; font-size: 11px; }
+  #play:hover { border-color: #555; color: #fff; }
+  #clock { font-variant-numeric: tabular-nums; color: #bbb; min-width: 150px; }
+  #clock span { color: #555; }
+  .transport .hint { flex: 1; text-align: right; color: #444; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Timeline: the video across, trimmed to the handles, and the spans the
+     cursor shows for. */
+  #timeline {
+    position: relative; padding: 4px 16px 14px;
+    display: grid; grid-template-columns: 52px 1fr; row-gap: 4px; align-items: center;
+  }
+  #timeline .lbl { color: #666; font-size: 11px; }
+  #tl-ruler { position: relative; height: 16px; cursor: text; }
+  #tl-ruler span { position: absolute; top: 1px; transform: translateX(-50%); color: #555; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; }
+  #tl-ruler span::after { content: ""; position: absolute; left: 50%; bottom: -4px; width: 1px; height: 4px; background: #333; }
+  .tl-track { position: relative; height: 28px; background: #111; }
+  #tl-video { cursor: text; background: #1a1a1a; }
+  #tl-video .shade { position: absolute; top: 0; bottom: 0; background: rgba(5, 5, 5, 0.78); pointer-events: none; }
+  #tl-video .kept { position: absolute; top: 0; bottom: 0; border-top: 2px solid #ffcf3d; border-bottom: 2px solid #ffcf3d; pointer-events: none; }
+  #tl-video .handle { position: absolute; top: -2px; bottom: -2px; width: 9px; background: #ffcf3d; cursor: ew-resize; }
+  #tl-video .handle.in { margin-left: -9px; }
+  #tl-video .handle::after { content: ""; position: absolute; left: 3px; top: 9px; bottom: 9px; width: 1px; border-left: 1px solid rgba(0, 0, 0, 0.45); border-right: 1px solid rgba(0, 0, 0, 0.45); width: 3px; }
+  #tl-video .mark { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.28); pointer-events: none; }
+  #tl-video .mark.reload { background: rgba(255, 77, 46, 0.7); }
+  #tl-video .anim { position: absolute; bottom: 0; height: 4px; background: rgba(77, 163, 255, 0.55); pointer-events: none; }
+  #tl-cursor { cursor: crosshair; overflow: hidden; }
+  .span { position: absolute; top: 3px; bottom: 3px; background: rgba(255, 77, 46, 0.35); border: 1px solid #ff4d2e; cursor: grab; }
+  .span.selected { background: rgba(255, 77, 46, 0.65); }
+  .span::before, .span::after { content: ""; position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
+  .span::before { left: -1px; }
+  .span::after { right: -1px; }
+  .span .x { position: absolute; right: 3px; top: 2px; color: #fff; font-size: 12px; line-height: 16px; display: none; cursor: pointer; }
+  .span:hover .x { display: block; }
+  body.dragging, body.dragging * { cursor: ew-resize !important; }
+  body.dragging.moving, body.dragging.moving * { cursor: grabbing !important; }
+  #tl-playhead { position: absolute; top: 4px; bottom: 14px; width: 2px; margin-left: -1px; background: #fff; pointer-events: none; }
+  #tl-playhead::before { content: ""; position: absolute; left: -4px; top: 0; border: 5px solid transparent; border-top-color: #fff; }
+
+  body.busy main, body.busy footer { pointer-events: none; }
+  body.busy aside, body.busy footer { opacity: 0.5; }
+</style>
+</head>
+<body class="no-cursor">
+<header>
+  <h1 id="name">Edit</h1>
+  <span class="meta" id="meta"></span>
+  <span class="status" id="status"></span>
+  <button class="btn" id="discard" title="Throw the recording away">Discard</button>
+  <button class="btn" id="reveal" title="Show the saved video in Finder">Reveal</button>
+  <button class="btn primary" id="save" title="Save to Movies/Darc (⌘S)">Save</button>
+  <button id="close" title="Close (⌘W)">×</button>
+</header>
+<main>
+  <div id="stage">
+    <div id="frame"><video id="video" preload="auto" muted playsinline></video><canvas id="overlay"></canvas></div>
+    <div id="empty">Loading…</div>
+  </div>
+  <aside>
+    <section>
+      <h2>Cursor <span class="sub" id="cursor-sub"></span></h2>
+      <div class="cursor-only">
+        <div class="field"><label>Cursor</label>
+          <select id="cur-mode">
+            <option value="off">Off</option>
+            <option value="auto">Page's cursor</option>
+            <option value="arrow">Arrow</option>
+            <option value="custom">Custom image</option>
+          </select></div>
+        <div class="field"><label>Size</label>
+          <input type="range" data-cur="size" min="12" max="64" step="1">
+          <input class="num" data-cur="size" type="number" min="8" max="128" step="1" title="22 is macOS's own pointer size"></div>
+        <div class="field"><label>Smoothing</label>
+          <input type="range" data-cur="smoothing" min="0" max="600" step="10">
+          <input class="num" data-cur="smoothing" type="number" min="0" step="10" title="ms to settle · 0 follows the mouse exactly"></div>
+        <div class="field"><label>Damping</label>
+          <input type="range" data-cur="damping" min="0.3" max="1.5" step="0.05">
+          <input class="num" data-cur="damping" type="number" min="0.1" max="3" step="0.05" title="1 settles without overshoot · lower bounces · higher trails"></div>
+        <div class="field"><label>Shows</label>
+          <div class="row">
+            <button class="btn sm" id="vis-recorded" title="When it showed while recording">As recorded</button>
+            <button class="btn sm" id="vis-all">Always</button>
+            <button class="btn sm" id="vis-none">Never</button>
+          </div></div>
+        <p class="note">The cursor shows inside the spans on the Cursor track, fading in and out at each edge. Drag on the track to add one, drag a span to move it or its edges to resize it; ⌫ removes the selected span.</p>
+      </div>
+      <p class="note no-cursor-only">There's no cursor data for this video, so there's no cursor to add. Recordings made with this version of Darc have it.</p>
+    </section>
+    <section>
+      <h2>Trim <span class="sub" id="trim-sub"></span></h2>
+      <div class="field"><label>Start</label>
+        <input class="num" id="trim-in" type="number" step="0.01" min="0">
+        <button class="btn sm" id="set-in" title="Start at the playhead (I)">Playhead</button></div>
+      <div class="field"><label>End</label>
+        <input class="num" id="trim-out" type="number" step="0.01" min="0">
+        <button class="btn sm" id="set-out" title="End at the playhead (O)">Playhead</button></div>
+      <div class="field"><label>Length</label>
+        <span class="val" id="trim-len"></span>
+        <button class="btn sm" id="trim-reset" title="Keep the whole recording">Reset</button></div>
+      <p class="note">Drag the yellow handles on the Video track, or press I and O to start and end at the playhead.</p>
+    </section>
+  </aside>
+</main>
+<footer>
+  <div class="transport">
+    <button id="play" title="Play / pause (space)">▶</button>
+    <span id="clock"></span>
+    <span class="hint">space play · ← → frame (⇧ second) · I / O trim · ⌫ delete span · ⌘Z undo · ⌘S save</span>
+  </div>
+  <div id="timeline">
+    <span class="lbl"></span>
+    <div id="tl-ruler"></div>
+    <span class="lbl">Video</span>
+    <div class="tl-track" id="tl-video"></div>
+    <span class="lbl cursor-only" title="When the cursor shows">Cursor</span>
+    <div class="tl-track cursor-only" id="tl-cursor" title="Drag to add a span the cursor shows for"></div>
+    <div id="tl-playhead"></div>
+  </div>
+</footer>
+
+<script src="vendor/mp4-muxer.js"></script>
+<script src="cursor-shapes.js"></script>
+<script src="cursor-layer.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const video = $('video');
+  const overlay = $('overlay');
+
+  let info = null; // from the main process: url, name, index, take
+  let take = null; // what the recorder logged, or null for a plain video
+  let FPS = 60;
+  let W = 0;
+  let H = 0;
+  let frames = 0; // frames in the video
+  let duration = 0; // seconds
+  let current = 0; // frame on screen
+  let edits = null; // { in, out (s), spans [{ start, end }] (s), cursor { mode, size, smoothing, damping } }
+  let recordedSpans = [];
+  let dirty = false;
+  let saved = null; // { path, name } once saved
+  let saving = null; // { cancelled } while saving
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const snapFrame = (t) => Math.round(t * FPS) / FPS;
+  const inFrame = () => Math.round(edits.in * FPS);
+  const outFrame = () => Math.round(edits.out * FPS);
+  const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, '0')}`;
+  const fmtTick = (s, step) => (step < 1 && s < 60 ? `${+s.toFixed(2)}s` : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`);
+
+  function status(html, error) {
+    $('status').innerHTML = html;
+    $('status').classList.toggle('error', !!error);
+  }
+
+  // ---- Cursor --------------------------------------------------------------
+  // The recorder logged the pointer and animation playback; the cursor is
+  // replayed from them one video frame at a time, exactly as saving draws it.
+  // Positions for every frame are worked out up front (springs depend on
+  // everything before them), then looked up while previewing.
+  class ReplayCursor extends CursorLayer {
+    // Shown inside the editor's spans, in video time. With `recorded` it
+    // follows the rules recording used, to work out where those spans start.
+    wanted() {
+      if (this.recorded) return super.wanted();
+      if (this.settings.mode === 'off' || !this.pos) return 0;
+      if (this.followsPage() && this.shape.type === 'none') return 0;
+      return this.visible ? 1 : 0;
+    }
+
+    reset() {
+      this.pos = null;
+      this.vel = { x: 0, y: 0 };
+      this.target = null;
+      this.inside = false;
+      this.shape = { type: 'default' };
+      this.alpha = 0;
+      this.anim = { playing: false, elapsed: 0 };
+      this.visible = false;
+    }
+  }
+
+  let layer = null;
+  let pointerLog = [];
+  let animLog = [];
+  let sim = null; // { x, y, alpha, shape } per frame
+  let anyVisible = false;
+
+  const baseSettings = () => take.cursor.settings;
+  const cursorSettings = () => ({ ...baseSettings(), ...edits.cursor });
+
+  function simulate(recorded) {
+    const L = layer;
+    L.reset();
+    L.recorded = recorded;
+    if (recorded) {
+      // Work out where it would have shown even if it was off for the take.
+      const s = baseSettings();
+      L.configure({ ...s, mode: s.mode === 'off' ? 'auto' : s.mode });
+    } else L.configure(cursorSettings());
+    const n = frames;
+    const out = recorded ? { want: new Uint8Array(n) } : { x: new Float32Array(n), y: new Float32Array(n), alpha: new Float32Array(n), shape: new Array(n) };
+    const spans = edits.spans;
+    let pi = 0;
+    let ai = 0;
+    let si = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / FPS;
+      while (pi < pointerLog.length && pointerLog[pi].t <= t) L.pointer(pointerLog[pi++]);
+      while (ai < animLog.length && animLog[ai].t <= t) L.progress(animLog[ai++]);
+      if (recorded) {
+        out.want[i] = L.wanted();
+        continue;
+      }
+      while (si < spans.length && spans[si].end <= t) si++;
+      L.visible = si < spans.length && spans[si].start <= t;
+      L.step(1 / FPS);
+      out.x[i] = L.pos ? L.pos.x : NaN;
+      out.y[i] = L.pos ? L.pos.y : NaN;
+      out.alpha[i] = L.alpha;
+      out.shape[i] = L.shape;
+    }
+    L.recorded = false;
+    L.configure(cursorSettings());
+    return out;
+  }
+
+  // Runs of frames the cursor showed for while recording, as spans.
+  function spansFromRecording() {
+    const { want } = simulate(true);
+    const out = [];
+    let start = -1;
+    for (let i = 0; i <= want.length; i++) {
+      const on = i < want.length && want[i];
+      if (on && start < 0) start = i;
+      else if (!on && start >= 0) {
+        out.push({ start: start / FPS, end: i / FPS });
+        start = -1;
+      }
+    }
+    return out;
+  }
+
+  let simQueued = false;
+  function resimulate() {
+    if (!take || simQueued) return;
+    simQueued = true;
+    requestAnimationFrame(() => {
+      simQueued = false;
+      sim = simulate(false);
+      anyVisible = edits.cursor.mode !== 'off' && sim.alpha.some((a) => a > 0.005);
+      drawOverlay();
+    });
+  }
+
+  // Draws frame i's cursor into ctx, whose transform maps video pixels.
+  function drawCursor(ctx, i) {
+    if (!sim || edits.cursor.mode === 'off') return;
+    const x = sim.x[i];
+    if (!(sim.alpha[i] > 0.005) || Number.isNaN(x)) return;
+    layer.pos = { x, y: sim.y[i] };
+    layer.alpha = sim.alpha[i];
+    layer.shape = sim.shape[i];
+    layer.draw(ctx);
+  }
+
+  function drawOverlay() {
+    const dpr = devicePixelRatio;
+    const w = Math.round(overlay.clientWidth * dpr);
+    const h = Math.round(overlay.clientHeight * dpr);
+    if (!w || !h || !W) return;
+    if (overlay.width !== w || overlay.height !== h) {
+      overlay.width = w;
+      overlay.height = h;
+    }
+    const ctx = overlay.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(w / W, 0, 0, h / H, 0, 0);
+    drawCursor(ctx, clamp(current, 0, frames - 1));
+  }
+
+  // ---- Cursor settings -----------------------------------------------------
+  const MODES = { off: 'Off', auto: "Page's cursor", arrow: 'Arrow', custom: 'Custom image' };
+  function renderCursor() {
+    if (!take) return;
+    const c = edits.cursor;
+    $('cur-mode').value = c.mode;
+    for (const inp of document.querySelectorAll('[data-cur]')) {
+      if (inp !== document.activeElement) inp.value = c[inp.dataset.cur];
+    }
+    $('cursor-sub').textContent = c.mode === 'off' ? 'Off' : `${MODES[c.mode]} · ${edits.spans.length} span${edits.spans.length === 1 ? '' : 's'}`;
+  }
+
+  $('cur-mode').addEventListener('change', () => {
+    record('mode');
+    edits.cursor.mode = $('cur-mode').value;
+    $('cur-mode').blur();
+    changed();
+  });
+  for (const inp of document.querySelectorAll('[data-cur]')) {
+    inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value);
+      if (!Number.isFinite(v)) return;
+      record(`cur-${inp.dataset.cur}`);
+      edits.cursor[inp.dataset.cur] = v;
+      for (const other of document.querySelectorAll(`[data-cur="${inp.dataset.cur}"]`)) if (other !== inp) other.value = v;
+      changed();
+    });
+    if (inp.type === 'range') inp.addEventListener('change', () => inp.blur());
+  }
+  const setSpans = (spans) => {
+    record();
+    edits.spans = spans.map((s) => ({ ...s }));
+    selSpan = -1;
+    changed();
+  };
+  $('vis-recorded').addEventListener('click', () => setSpans(recordedSpans));
+  $('vis-all').addEventListener('click', () => setSpans([{ start: 0, end: duration }]));
+  $('vis-none').addEventListener('click', () => setSpans([]));
+
+  // ---- Trim ----------------------------------------------------------------
+  const MIN_LENGTH = 0.1; // s
+  function setTrim(edge, t) {
+    t = snapFrame(t);
+    if (edge === 'in') edits.in = clamp(t, 0, edits.out - MIN_LENGTH);
+    else edits.out = clamp(t, edits.in + MIN_LENGTH, duration);
+  }
+  function renderTrim() {
+    for (const [id, v] of [['trim-in', edits.in], ['trim-out', edits.out]]) {
+      if ($(id) !== document.activeElement) $(id).value = v.toFixed(2);
+    }
+    const len = edits.out - edits.in;
+    $('trim-len').textContent = fmt(len);
+    $('trim-sub').textContent = len < duration - 1e-6 ? `${fmt(edits.in)} – ${fmt(edits.out)}` : 'Whole recording';
+  }
+  for (const [id, edge] of [['trim-in', 'in'], ['trim-out', 'out']]) {
+    $(id).addEventListener('change', () => {
+      const v = parseFloat($(id).value);
+      if (Number.isFinite(v)) {
+        record();
+        setTrim(edge, v);
+        changed();
+      }
+      renderTrim();
+    });
+    $(id).addEventListener('keydown', (e) => e.key === 'Enter' && $(id).blur());
+  }
+  const trimToPlayhead = (edge) => {
+    record();
+    setTrim(edge, edge === 'in' ? current / FPS : (current + 1) / FPS);
+    changed();
+  };
+  $('set-in').addEventListener('click', () => trimToPlayhead('in'));
+  $('set-out').addEventListener('click', () => trimToPlayhead('out'));
+  $('trim-reset').addEventListener('click', () => {
+    record();
+    edits.in = 0;
+    edits.out = duration;
+    changed();
+  });
+
+  // ---- Undo ------------------------------------------------------------------
+  const history = { undo: [], redo: [] };
+  let lastEdit = { tag: null, time: 0 };
+  const snapshot = () => JSON.stringify(edits);
+  // Slider drags and typing coalesce into one step per control.
+  function record(tag) {
+    const now = Date.now();
+    if (tag && tag === lastEdit.tag && now - lastEdit.time < 800) {
+      lastEdit.time = now;
+      return;
+    }
+    lastEdit = { tag, time: now };
+    pushSnapshot(snapshot(), tag);
+  }
+  function pushSnapshot(s, tag) {
+    history.undo.push(s);
+    if (history.undo.length > 200) history.undo.shift();
+    history.redo.length = 0;
+    if (!tag) lastEdit = { tag: null, time: 0 };
+  }
+  function undo(redo) {
+    const [from, to] = redo ? [history.redo, history.undo] : [history.undo, history.redo];
+    if (!from.length) return;
+    to.push(snapshot());
+    edits = JSON.parse(from.pop());
+    lastEdit = { tag: null, time: 0 };
+    selSpan = -1;
+    changed();
+  }
+
+  function changed() {
+    dirty = true;
+    narc.state(edits, dirty);
+    document.body.classList.remove('saved');
+    if (saved) status(`Saved <b>${saved.name}</b> · changed since`);
+    renderCursor();
+    renderTrim();
+    renderTimeline();
+    resimulate();
+  }
+
+  // ---- Playback ------------------------------------------------------------
+  // `current` is the frame on screen. Seeks aim a quarter frame past a frame's
+  // start so rounding never lands on the one before.
+  function seekFrame(i) {
+    current = clamp(Math.round(i), 0, frames - 1);
+    video.currentTime = (current + 0.25) / FPS;
+    drawOverlay();
+    renderPlayhead();
+  }
+
+  const playing = () => !video.paused && !video.ended;
+  function play() {
+    if (playing()) return pause();
+    if (current < inFrame() || current >= outFrame() - 1) seekFrame(inFrame());
+    video.play().catch(() => {});
+  }
+  function pause() {
+    video.pause();
+    seekFrame(current);
+  }
+  video.addEventListener('play', () => ($('play').textContent = '❚❚'));
+  video.addEventListener('pause', () => ($('play').textContent = '▶'));
+  $('play').addEventListener('click', play);
+
+  function onVideoFrame(_now, meta) {
+    const i = Math.round(meta.mediaTime * FPS);
+    if (playing()) {
+      current = i;
+      // Playback stops at the end of the trim.
+      if (current >= outFrame() - 1) {
+        video.pause();
+        seekFrame(outFrame() - 1);
+      }
+      drawOverlay();
+      renderPlayhead();
+    }
+    video.requestVideoFrameCallback(onVideoFrame);
+  }
+
+  // ---- Layout --------------------------------------------------------------
+  function fitFrame() {
+    if (!W) return;
+    const stage = $('stage');
+    const pad = 24;
+    const k = Math.min((stage.clientWidth - pad * 2) / W, (stage.clientHeight - pad * 2) / H);
+    $('frame').style.width = `${Math.max(1, Math.floor(W * k))}px`;
+    $('frame').style.height = `${Math.max(1, Math.floor(H * k))}px`;
+    drawOverlay();
+  }
+  new ResizeObserver(fitFrame).observe($('stage'));
+  new ResizeObserver(() => renderTimeline()).observe($('timeline'));
+
+  // ---- Timeline ------------------------------------------------------------
+  const tlRuler = $('tl-ruler');
+  const tlVideo = $('tl-video');
+  const tlCursor = $('tl-cursor');
+  const tlPlayhead = $('tl-playhead');
+  const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800];
+  let selSpan = -1;
+
+  const trackWidth = () => tlVideo.clientWidth;
+  const tlX = (t) => (t / duration) * trackWidth();
+  const tlT = (clientX) => {
+    const r = tlVideo.getBoundingClientRect();
+    return clamp(((clientX - r.left) / r.width) * duration, 0, duration);
+  };
+
+  function renderTimeline() {
+    if (!edits) return;
+    const step = STEPS.find((s) => tlX(s) >= 56) || STEPS[STEPS.length - 1];
+    let ruler = '';
+    for (let t = 0; t <= duration + 1e-6; t += step) ruler += `<span style="left:${tlX(t)}px">${fmtTick(t, step)}</span>`;
+    tlRuler.innerHTML = ruler;
+
+    const marks = (take ? take.events || [] : []).map((ev) => `<div class="mark ${ev.type}" style="left:${tlX(ev.t)}px"></div>`).join('');
+    const anims = (take ? take.animSpans || [] : []).map((sp) => {
+      const end = sp.end == null ? duration : sp.end;
+      return `<div class="anim" style="left:${tlX(sp.start)}px;width:${Math.max(2, tlX(end) - tlX(sp.start))}px"></div>`;
+    }).join('');
+    const a = tlX(edits.in);
+    const b = tlX(edits.out);
+    tlVideo.innerHTML = `${marks}${anims}`
+      + `<div class="shade" style="left:0;width:${a}px"></div><div class="shade" style="left:${b}px;right:0"></div>`
+      + `<div class="kept" style="left:${a}px;width:${b - a}px"></div>`
+      + `<div class="handle in" data-edge="in" style="left:${a}px" title="Start ${fmt(edits.in)}"></div>`
+      + `<div class="handle out" data-edge="out" style="left:${b}px" title="End ${fmt(edits.out)}"></div>`;
+
+    tlCursor.innerHTML = edits.spans.map((sp, j) => {
+      const w = Math.max(3, tlX(sp.end) - tlX(sp.start));
+      return `<div class="span${j === selSpan ? ' selected' : ''}" data-span="${j}" style="left:${tlX(sp.start)}px;width:${w}px" title="Cursor shown ${fmt(sp.start)} – ${fmt(sp.end)}"><span class="x" data-remove-span="${j}" title="Remove">×</span></div>`;
+    }).join('');
+    renderPlayhead();
+  }
+
+  function renderPlayhead() {
+    if (!duration) return;
+    tlPlayhead.style.left = `${tlVideo.offsetLeft + tlX(current / FPS)}px`;
+    $('clock').innerHTML = `${fmt(current / FPS)} <span>/ ${fmt(duration)}</span>`;
+  }
+
+  // Snap to the playhead, the trim and other spans' edges when within a few px.
+  function snapT(t, skip) {
+    const pxPer = trackWidth() / duration;
+    const points = [0, duration, edits.in, edits.out, current / FPS];
+    edits.spans.forEach((sp, j) => j !== skip && points.push(sp.start, sp.end));
+    let best = snapFrame(t);
+    let dist = 6 / pxPer;
+    for (const p of points) {
+      if (Math.abs(p - t) < dist) {
+        dist = Math.abs(p - t);
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  // Clamp spans to the video, drop empty ones and merge any that overlap.
+  function normalizeSpans() {
+    const sorted = edits.spans
+      .map((s) => ({ start: clamp(s.start, 0, duration), end: clamp(s.end, 0, duration) }))
+      .filter((s) => s.end - s.start >= 1 / FPS)
+      .sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const s of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+      else merged.push(s);
+    }
+    const sel = edits.spans[selSpan];
+    edits.spans = merged;
+    selSpan = sel ? merged.findIndex((s) => sel.start >= s.start && sel.start <= s.end) : -1;
+  }
+
+  function removeSpan(j) {
+    record();
+    edits.spans.splice(j, 1);
+    selSpan = -1;
+    changed();
+  }
+
+  // drag: { kind: 'scrub' } | { kind: 'trim', edge } | { kind: 'span', mode, j, anchor, origin }, with `before` for undo
+  let drag = null;
+
+  function scrubTo(clientX) {
+    seekFrame(Math.floor(tlT(clientX) * FPS));
+  }
+
+  for (const el of [tlRuler, tlVideo]) {
+    el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || !edits) return;
+      e.preventDefault();
+      if (playing()) video.pause();
+      const handle = e.target.closest('.handle');
+      if (handle) {
+        drag = { kind: 'trim', edge: handle.dataset.edge, before: snapshot(), moved: false };
+        document.body.classList.add('dragging');
+        return;
+      }
+      drag = { kind: 'scrub' };
+      scrubTo(e.clientX);
+    });
+  }
+
+  tlCursor.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !edits) return;
+    e.preventDefault();
+    const remove = e.target.closest('[data-remove-span]');
+    if (remove) return removeSpan(+remove.dataset.removeSpan);
+    const before = snapshot();
+    const el = e.target.closest('.span');
+    if (el) {
+      const j = +el.dataset.span;
+      const r = el.getBoundingClientRect();
+      const mode = e.clientX - r.left <= 7 ? 'start' : r.right - e.clientX <= 7 ? 'end' : 'move';
+      selSpan = j;
+      drag = { kind: 'span', mode, j, anchor: tlT(e.clientX), origin: { ...edits.spans[j] }, before, moved: false };
+      document.body.classList.toggle('moving', mode === 'move');
+    } else {
+      const t = snapT(tlT(e.clientX), -1);
+      edits.spans.push({ start: t, end: t });
+      selSpan = edits.spans.length - 1;
+      drag = { kind: 'span', mode: 'create', j: selSpan, anchor: t, before, moved: false };
+      document.body.classList.remove('moving');
+    }
+    document.body.classList.add('dragging');
+    renderTimeline();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    if (drag.kind === 'scrub') return scrubTo(e.clientX);
+    drag.moved = true;
+    if (drag.kind === 'trim') {
+      setTrim(drag.edge, tlT(e.clientX));
+      seekFrame(drag.edge === 'in' ? inFrame() : outFrame() - 1);
+      renderTrim();
+      renderTimeline();
+      return;
+    }
+    const d = drag;
+    const sp = edits.spans[d.j];
+    const t = tlT(e.clientX);
+    if (d.mode === 'create') {
+      const s = snapT(t, d.j);
+      sp.start = Math.min(d.anchor, s);
+      sp.end = Math.max(d.anchor, s);
+    } else if (d.mode === 'start') {
+      sp.start = Math.min(snapT(t, d.j), sp.end);
+    } else if (d.mode === 'end') {
+      sp.end = Math.max(snapT(t, d.j), sp.start);
+    } else {
+      const len = d.origin.end - d.origin.start;
+      const raw = clamp(d.origin.start + (t - d.anchor), 0, duration - len);
+      // Snap whichever edge is nearer to something.
+      const byStart = snapT(raw, d.j);
+      const byEnd = snapT(raw + len, d.j) - len;
+      const start = Math.abs(byStart - raw) <= Math.abs(byEnd - raw) ? byStart : byEnd;
+      sp.start = clamp(start, 0, duration - len);
+      sp.end = sp.start + len;
+    }
+    renderTimeline();
+    resimulate();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    document.body.classList.remove('dragging', 'moving');
+    if (d.kind === 'scrub') return;
+    if (d.kind === 'span' && d.mode === 'create') {
+      const sp = edits.spans[d.j];
+      // A click (or a tiny drag) on empty track adds nothing.
+      if (!sp || tlX(sp.end) - tlX(sp.start) < 4) {
+        edits.spans.splice(d.j, 1);
+        selSpan = -1;
+        renderTimeline();
+        return;
+      }
+    }
+    if (d.kind === 'span') normalizeSpans();
+    if (d.moved || d.mode === 'create') {
+      pushSnapshot(d.before);
+      changed();
+    } else renderTimeline();
+  });
+
+  // ---- Saving ----------------------------------------------------------------
+  // Decodes the take, draws the cursor onto each kept frame and encodes it
+  // again. With nothing to draw and nothing trimmed the file is copied as is.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const isHevc = () => /^(hvc1|hev1)$/.test(info.index.codec);
+
+  function decoderCodec() {
+    const d = info.index.description;
+    const hex = (b) => b.toString(16).padStart(2, '0');
+    if (!isHevc()) return `avc1.${hex(d[1])}${hex(d[2])}${hex(d[3])}`;
+    return (take && take.config && take.config.codec) || 'hvc1.1.6.L186.B0';
+  }
+
+  async function encoderConfig() {
+    const base = take && take.config ? { ...take.config } : {
+      codec: isHevc() ? 'hvc1.1.6.L186.B0' : `avc1.6400${W * H > 4096 * 2304 ? '3c' : '34'}`,
+      bitrate: Math.round(Math.min(120e6, Math.max(8e6, W * H * FPS * 0.14))),
+      framerate: FPS,
+      hardwareAcceleration: 'prefer-hardware',
+      latencyMode: 'quality',
+      bitrateMode: 'variable',
+      ...(isHevc() ? { hevc: { format: 'hevc' } } : { avc: { format: 'avc' } }),
+    };
+    base.width = W;
+    base.height = H;
+    for (const hw of [base.hardwareAcceleration || 'prefer-hardware', 'no-preference']) {
+      const config = { ...base, hardwareAcceleration: hw };
+      try {
+        if ((await VideoEncoder.isConfigSupported(config)).supported) return config;
+      } catch {}
+    }
+    throw new Error('No video encoder available');
+  }
+
+  // Resolves when either codec frees up queue space (or soon anyway).
+  const dequeued = (...codecs) => new Promise((resolve) => {
+    const done = () => {
+      for (const c of codecs) c.removeEventListener('dequeue', done);
+      clearTimeout(timer);
+      resolve();
+    };
+    for (const c of codecs) c.addEventListener('dequeue', done);
+    const timer = setTimeout(done, 20);
+  });
+
+  async function encode(job, progress) {
+    const S = info.index.samples;
+    const count = S.size.length;
+    const first = inFrame();
+    const last = outFrame(); // exclusive
+    const end = edits.out;
+    // Start decoding from the last keyframe at or before the trim start.
+    let start = 0;
+    for (let i = 0; i < count && S.dts[i] <= edits.in + 1e-6; i++) if (S.key[i]) start = i;
+
+    const config = await encoderConfig();
+    const out = await narc.openOutput();
+    if (out.error) throw new Error(out.error);
+    let error = null;
+    const fail = (err) => {
+      if (!error) error = err;
+    };
+    let decoder;
+    let encoder;
+    try {
+      const muxer = new Mp4Muxer.Muxer({
+        target: new Mp4Muxer.StreamTarget({ chunked: true, onData: (data, position) => narc.write(position, data.slice()) }),
+        video: { codec: isHevc() ? 'hevc' : 'avc', width: W, height: H, frameRate: FPS },
+        fastStart: false,
+        firstTimestampBehavior: 'offset',
+      });
+      encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: fail });
+      encoder.configure(config);
+      const canvas = new OffscreenCanvas(W, H);
+      const ctx = canvas.getContext('2d', { alpha: false });
+      let encoded = 0;
+      decoder = new VideoDecoder({
+        output: (frame) => {
+          try {
+            const i = Math.round((frame.timestamp / 1e6) * FPS);
+            if (i < first || i >= last || error || job.cancelled) return;
+            ctx.drawImage(frame, 0, 0, W, H);
+            drawCursor(ctx, i);
+            const f = new VideoFrame(canvas, { timestamp: Math.round(((i - first) * 1e6) / FPS), duration: Math.round(1e6 / FPS) });
+            encoder.encode(f, { keyFrame: encoded % (FPS * 2) === 0 });
+            f.close();
+            encoded++;
+            progress((i - first + 1) / (last - first));
+          } catch (err) {
+            fail(err);
+          } finally {
+            frame.close();
+          }
+        },
+        error: fail,
+      });
+      decoder.configure({ codec: decoderCodec(), description: info.index.description, codedWidth: W, codedHeight: H });
+
+      const past = (k) => S.dts[k] >= end && S.pts[k] >= end;
+      for (let i = start; i < count && !past(i) && !error && !job.cancelled;) {
+        // Read runs of back-to-back samples in one go.
+        let j = i + 1;
+        let bytes = S.size[i];
+        while (j < count && j - i < 32 && !past(j) && S.offset[j] === S.offset[j - 1] + S.size[j - 1]) bytes += S.size[j++];
+        const data = await narc.read(S.offset[i], bytes);
+        let o = 0;
+        for (let k = i; k < j && !error && !job.cancelled; k++) {
+          while ((decoder.decodeQueueSize > 4 || encoder.encodeQueueSize > 4) && !error && !job.cancelled) await dequeued(decoder, encoder);
+          decoder.decode(new EncodedVideoChunk({
+            type: S.key[k] ? 'key' : 'delta',
+            timestamp: Math.round(S.pts[k] * 1e6),
+            duration: Math.round(1e6 / FPS),
+            data: data.subarray(o, o + S.size[k]),
+          }));
+          o += S.size[k];
+        }
+        i = j;
+      }
+      if (!error && !job.cancelled) {
+        await decoder.flush();
+        await encoder.flush();
+        if (!error && !encoded) error = new Error('Nothing to save');
+        if (!error && !job.cancelled) muxer.finalize();
+      }
+    } catch (err) {
+      fail(err);
+    } finally {
+      for (const c of [decoder, encoder]) {
+        try {
+          if (c && c.state !== 'closed') c.close();
+        } catch {}
+      }
+    }
+    if (error || job.cancelled) {
+      await narc.finishOutput(false);
+      if (error) throw error;
+      return null;
+    }
+    return narc.finishOutput(true);
+  }
+
+  function setBusy(on) {
+    document.body.classList.toggle('busy', on);
+    $('save').disabled = on;
+    $('close').disabled = on;
+    $('discard').textContent = on ? 'Cancel' : 'Discard';
+    $('discard').title = on ? 'Stop saving' : 'Throw the recording away';
+  }
+
+  async function save() {
+    if (saving || !edits) return null;
+    if (playing()) pause();
+    const job = (saving = { cancelled: false });
+    setBusy(true);
+    const t0 = performance.now();
+    let res = null;
+    try {
+      // Cursor images have to be loaded before they can be drawn.
+      if (layer) await Promise.all([...Object.values(layer.builtin), ...layer.images.values(), layer.custom].filter(Boolean).map((img) => img.decode().catch(() => {})));
+      if (sim == null && take) sim = simulate(false);
+      const whole = inFrame() === 0 && outFrame() >= frames;
+      if (whole && !anyVisible) {
+        status('Saving…');
+        res = await narc.copy();
+      } else {
+        status('Saving… 0%');
+        res = await encode(job, (p) => status(`Saving… ${Math.floor(p * 100)}%`));
+      }
+      if (!res) status('Save cancelled');
+      else if (res.error) status(`Couldn't save: ${res.error}`, true);
+      else {
+        saved = res;
+        dirty = false;
+        narc.state(edits, dirty);
+        document.body.classList.add('saved');
+        status(`Saved <b>${res.name}</b> · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+      }
+    } catch (err) {
+      console.error(err);
+      res = { error: String(err.message || err) };
+      status(`Couldn't save: ${res.error}`, true);
+    } finally {
+      saving = null;
+      setBusy(false);
+    }
+    return res;
+  }
+
+  $('save').addEventListener('click', save);
+  $('reveal').addEventListener('click', () => narc.reveal());
+  $('close').addEventListener('click', () => narc.close());
+  let discardTimer = 0;
+  $('discard').addEventListener('click', () => {
+    if (saving) {
+      saving.cancelled = true;
+      return;
+    }
+    if (!info || !info.isTake) return narc.close();
+    // Asks once more first: there's no getting it back.
+    if (!$('discard').classList.contains('confirm')) {
+      $('discard').classList.add('confirm');
+      $('discard').textContent = 'Discard?';
+      clearTimeout(discardTimer);
+      discardTimer = setTimeout(() => {
+        $('discard').classList.remove('confirm');
+        $('discard').textContent = 'Discard';
+      }, 3000);
+      return;
+    }
+    narc.discard();
+  });
+  narc.onBusy(() => status('Saving · cancel it first to close'));
+
+  // ---- Keyboard --------------------------------------------------------------
+  window.addEventListener('keydown', (e) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      save();
+      return;
+    }
+    if (!edits || saving) return;
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) && document.activeElement.type !== 'range';
+    if (typing) return;
+    if (mod && !e.altKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      undo(e.shiftKey);
+      return;
+    }
+    if (mod || e.altKey) return;
+    const k = e.key;
+    if (k === ' ') play();
+    else if (k === 'ArrowLeft' || k === 'ArrowRight') {
+      if (playing()) video.pause();
+      seekFrame(current + (k === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? FPS : 1));
+    } else if (k === 'Home') seekFrame(inFrame());
+    else if (k === 'End') seekFrame(outFrame() - 1);
+    else if (k === 'i' || k === 'I') trimToPlayhead('in');
+    else if (k === 'o' || k === 'O') trimToPlayhead('out');
+    else if ((k === 'Backspace' || k === 'Delete') && selSpan >= 0) removeSpan(selSpan);
+    else if (k === 'Escape' && selSpan >= 0) {
+      selSpan = -1;
+      renderTimeline();
+    } else return;
+    e.preventDefault();
+  });
+
+  // ---- Load ------------------------------------------------------------------
+  async function load() {
+    info = await narc.init();
+    if (info.error) {
+      $('empty').textContent = `Couldn't open the recording.\n${info.error}`;
+      return;
+    }
+    take = info.take && info.take.version === 1 && info.take.cursor ? info.take : null;
+    FPS = (take && take.fps) || 60;
+    W = info.index.width;
+    H = info.index.height;
+    duration = info.index.duration;
+    frames = Math.max(1, Math.round(duration * FPS));
+    duration = frames / FPS;
+    document.title = info.name;
+    $('name').textContent = info.isTake ? info.output : info.name;
+    $('name').title = info.isTake ? `Saves to Movies/Darc/${info.output}` : info.name;
+    $('meta').textContent = `${W}×${H} · ${FPS} fps · ${fmt(duration)}`;
+    $('save').title = `Save to Movies/Darc/${info.output} (⌘S)`;
+    if (!info.isTake) $('discard').textContent = 'Close';
+    dirty = info.isTake;
+    document.body.classList.toggle('no-cursor', !take);
+
+    if (take) {
+      const c = take.cursor;
+      pointerLog = c.pointer.map(([t, x, y, inside, si]) => ({ t, x, y, inside: !!inside, shape: c.shapes[si] || { type: 'default' } }));
+      animLog = c.anim.map(([t, on, elapsed]) => ({ t, playing: !!on, elapsed }));
+      layer = new ReplayCursor({ settings: c.settings, spans: c.spans, scale: c.scale, images: c.images }, W, H);
+      if (!c.settings.image) $('cur-mode').querySelector('[value=custom]').remove();
+    }
+    const s = take ? take.cursor.settings : {};
+    edits = {
+      in: 0,
+      out: duration,
+      spans: [],
+      cursor: { mode: s.mode === 'custom' && !s.image ? 'auto' : s.mode || 'off', size: s.size || 22, smoothing: s.smoothing ?? 120, damping: s.damping || 1 },
+    };
+    if (take) {
+      recordedSpans = spansFromRecording();
+      edits.spans = recordedSpans.map((sp) => ({ ...sp }));
+      // Picks up where a kept take was left.
+      if (take.edits) edits = { ...edits, ...take.edits, cursor: { ...edits.cursor, ...take.edits.cursor } };
+      sim = simulate(false);
+      anyVisible = edits.cursor.mode !== 'off' && sim.alpha.some((a) => a > 0.005);
+      // Built-in shapes load asynchronously; draw once they're in.
+      Promise.all(Object.values(layer.builtin).map((img) => img.decode().catch(() => {}))).then(drawOverlay);
+    }
+    narc.state(edits, dirty);
+    renderCursor();
+    renderTrim();
+
+    video.src = info.url;
+    video.addEventListener('loadeddata', () => {
+      $('empty').style.display = 'none';
+      fitFrame();
+      seekFrame(0);
+    }, { once: true });
+    video.addEventListener('error', () => {
+      $('empty').textContent = `Couldn't play the recording.\n${(video.error && video.error.message) || ''}`;
+    });
+    video.requestVideoFrameCallback(onVideoFrame);
+    renderTimeline();
+    status(info.isTake ? 'Not saved yet' : '');
+  }
+
+  load();
+</script>
+</body>
+</html>

@@ -16,4 +16,5 @@ contextBridge.exposeInMainWorld('narc', {
   cursorGet: () => ipcRenderer.invoke('cursor:get'),
   cursorSet: (partial) => ipcRenderer.send('cursor:set', partial),
   cursorPick: () => ipcRenderer.invoke('cursor:pick'),
+  onCursor: (cb) => ipcRenderer.on('anim:cursor', (_e, c) => cb(c)),
 });

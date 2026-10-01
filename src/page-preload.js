@@ -317,19 +317,20 @@ ipcRenderer.on('anim:get-scroll', () => {
 });
 
 // While recording, report the root scroll velocity every frame so the
-// recorder can add motion blur along the direction of travel.
+// recorder can add motion blur along the direction of travel. The pointer
+// goes out on the same frames, while recording or while the live cursor is on.
 let motion = false;
 let motionRaf = 0;
 let motionLast = null;
 let motionMoving = false;
 function motionFrame(now) {
-  if (!motion) {
+  if (!motion && !live.on) {
     motionRaf = 0;
     return;
   }
   const el = root();
   const pos = { x: el.scrollLeft, y: el.scrollTop, t: now };
-  if (motionLast) {
+  if (motion && motionLast) {
     const dt = (now - motionLast.t) / 1000;
     if (dt > 0) {
       const dx = pos.x - motionLast.x;
@@ -358,6 +359,7 @@ ipcRenderer.on('rec:motion', (_e, on) => {
 
 // The recorder also gets the mouse position over the page and the CSS cursor
 // under it, for the pointer it draws into the footage (tab capture has none).
+// The live cursor window gets the same, to draw the smoothed pointer on screen.
 let pointer = null; // { x, y, inside } from the last mouse event
 let pointerSent = '';
 const cursorImages = new Map(); // CSS cursor url -> data URL, null if unfetchable, or a pending fetch
@@ -397,9 +399,58 @@ function cursorImage(url) {
   return pending;
 }
 
+// CSS cursor keywords -> the macOS shapes in cursor-shapes.js. Anything not
+// listed draws the arrow.
+const CURSOR_KEYWORDS = {
+  pointer: 'pointer',
+  grab: 'grab',
+  grabbing: 'grabbing',
+  text: 'text',
+  'vertical-text': 'text',
+  crosshair: 'cross',
+  cell: 'cross',
+  'context-menu': 'menu',
+  'zoom-in': 'zoom-in',
+  'zoom-out': 'zoom-out',
+  move: 'move',
+  'all-scroll': 'move',
+  wait: 'beachball',
+  'col-resize': 'col-resize',
+  'row-resize': 'row-resize',
+  'ew-resize': 'ew-resize',
+  'ns-resize': 'ns-resize',
+  'e-resize': 'resize-right',
+  'w-resize': 'resize-left',
+  'n-resize': 'resize-up',
+  's-resize': 'resize-down',
+  'nwse-resize': 'nwse-resize',
+  'nw-resize': 'nwse-resize',
+  'se-resize': 'nwse-resize',
+  'nesw-resize': 'nesw-resize',
+  'ne-resize': 'nesw-resize',
+  'sw-resize': 'nesw-resize',
+};
+
+// `cursor: auto` is an I-beam over selectable text and in text fields, like
+// the real pointer, and the arrow elsewhere.
+function autoCursor(el, x, y) {
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') return 'text';
+  if (el.tagName === 'INPUT') return /^(button|submit|reset|checkbox|radio|range|color|file|image)$/.test(el.type) ? 'default' : 'text';
+  if (getComputedStyle(el).userSelect === 'none') return 'default';
+  const range = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y);
+  const node = range && range.startContainer;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return 'default';
+  const r = document.createRange();
+  r.selectNodeContents(node);
+  for (const rect of r.getClientRects()) {
+    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return 'text';
+  }
+  return 'default';
+}
+
 // Reduce a computed `cursor` value to what the recorder can draw. Image
 // cursors are fetched in the background; the keyword fallback shows meanwhile.
-function cursorShape(value) {
+function cursorShape(value, el, x, y) {
   const m = /url\((["']?)(.*?)\1\)\s*(-?[\d.]+)?\s*(-?[\d.]+)?/.exec(value);
   if (m) {
     const url = m[2];
@@ -416,17 +467,16 @@ function cursorShape(value) {
   }
   const keyword = value.replace(/url\([^)]*\)[^,]*,?/g, '').trim().split(/\s*,\s*/).pop();
   if (keyword === 'none') return { type: 'none' };
-  if (keyword === 'pointer' || keyword === 'grab' || keyword === 'grabbing') return { type: 'hand' };
-  if (keyword === 'text' || keyword === 'vertical-text') return { type: 'text' };
-  return { type: 'arrow' };
+  if (keyword === 'auto') return { type: autoCursor(el, x, y) };
+  return { type: CURSOR_KEYWORDS[keyword] || 'default' };
 }
 
 function pointerFrame() {
   if (!pointer) return;
-  let shape = { type: 'arrow' };
+  let shape = { type: 'default' };
   if (pointer.inside) {
     const el = document.elementFromPoint(pointer.x, pointer.y);
-    if (el) shape = cursorShape(getComputedStyle(el).cursor || 'auto');
+    if (el) shape = cursorShape(cssCursor(el), el, pointer.x, pointer.y);
   }
   const msg = { x: pointer.x / innerWidth, y: pointer.y / innerHeight, inside: pointer.inside, shape };
   const key = JSON.stringify(msg);
@@ -434,3 +484,98 @@ function pointerFrame() {
   pointerSent = key;
   ipcRenderer.send('rec:pointer', msg);
 }
+
+// ---- Live cursor -------------------------------------------------------------
+// With the live cursor on, the page's mouse input comes from the cursor window,
+// already smoothed. The pointer and the CSS cursor under it go back to that
+// window every frame, so it draws the right shape. [ and ] change how smooth.
+let live = ipcRenderer.sendSync('cursor:live-get'); // { keys, on }
+
+// The cursor window can't hide the system pointer (it never has focus), so
+// the page does: it's under the pointer as far as macOS is concerned, and it
+// gets the smoothed mouse moves, so its `cursor: none` is what shows.
+const HIDE_ATTR = 'data-darc-live-cursor';
+const hideStyle = document.createElement('style');
+// The :not(#_) pairs outweigh the page's own `cursor: … !important` rules.
+hideStyle.textContent = `:root[${HIDE_ATTR}]:not(#_):not(#_), :root[${HIDE_ATTR}]:not(#_):not(#_) * { cursor: none !important; }`;
+let cursorEl = null; // element whose CSS cursor is cached while hidden
+let cursorValue = 'auto';
+
+function applyLiveCursor() {
+  const html = document.documentElement;
+  if (!html) return;
+  if (live.on) {
+    if (!hideStyle.isConnected) html.appendChild(hideStyle);
+    if (!html.hasAttribute(HIDE_ATTR)) html.setAttribute(HIDE_ATTR, '');
+  } else {
+    html.removeAttribute(HIDE_ATTR);
+    hideStyle.remove();
+  }
+}
+
+// The page's own CSS cursor for `el`. While the pointer is hidden that means
+// briefly lifting the hiding rule, so it's only read again when the element
+// under the pointer changes or a button goes down or up.
+function cssCursor(el) {
+  if (!live.on) return getComputedStyle(el).cursor || 'auto';
+  applyLiveCursor(); // the page may have replaced <html> or its attributes
+  if (el !== cursorEl) {
+    const html = document.documentElement;
+    html.removeAttribute(HIDE_ATTR);
+    cursorValue = getComputedStyle(el).cursor || 'auto';
+    html.setAttribute(HIDE_ATTR, '');
+    cursorEl = el;
+  }
+  return cursorValue;
+}
+for (const type of ['mousedown', 'mouseup']) {
+  window.addEventListener(type, () => { cursorEl = null; }, { capture: true, passive: true });
+}
+
+// Clicking the live cursor view takes focus from the page for a moment before
+// it's handed back. The page doesn't hear about that: losing focus would close
+// menus and pickers mid-click. Blurs the page causes itself (el.blur(), focus
+// moving within the page) still happen, as the document keeps focus for those.
+let focusHeld = false;
+for (const type of ['blur', 'focusout']) {
+  window.addEventListener(type, (e) => {
+    if (!live.on || !e.isTrusted || document.hasFocus()) return;
+    focusHeld = true;
+    e.stopImmediatePropagation();
+  }, true);
+}
+for (const type of ['focus', 'focusin']) {
+  window.addEventListener(type, (e) => {
+    if (!focusHeld || !e.isTrusted) return;
+    e.stopImmediatePropagation();
+    if (type === 'focus' && e.target === window) setTimeout(() => { focusHeld = false; });
+  }, true);
+}
+
+ipcRenderer.on('cursor:live', (_e, state) => {
+  const was = live.on;
+  live = state;
+  cursorEl = null;
+  applyLiveCursor();
+  if (live.on && !was) {
+    pointerSent = '';
+    cursorImagesSent.clear();
+    if (!motionRaf) motionRaf = requestAnimationFrame(motionFrame);
+  }
+});
+if (live.on) {
+  if (document.documentElement) applyLiveCursor();
+  document.addEventListener('DOMContentLoaded', applyLiveCursor);
+  motionRaf = requestAnimationFrame(motionFrame);
+}
+
+window.addEventListener('keydown', (e) => {
+  if (!live.keys || (e.key !== '[' && e.key !== ']')) return;
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+  let active = document.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+  if (isEditable(active)) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  ipcRenderer.send('cursor:nudge', e.key === ']' ? 1 : -1);
+}, true);

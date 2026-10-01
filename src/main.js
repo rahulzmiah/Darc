@@ -22,7 +22,11 @@ const CURSOR_DEFAULTS = {
   damping: 1, // spring damping ratio: below 1 overshoots, above 1 trails
   hotspot: 'tip', // where a custom image points from: 'tip' (top left) | 'center'
   custom: null, // { name, path } of an uploaded image
+  live: false, // also smooth the pointer on screen, not just in recordings
 };
+
+// Where [ and ] step the smoothing to, in ms.
+const SMOOTHING_STEPS = [0, 40, 80, 120, 160, 200, 250, 300, 400, 500, 600];
 
 const BLANK_PAGE = 'data:text/html,<body style="background:%23000"></body>';
 
@@ -45,7 +49,7 @@ function save() {
   saveTimer = setTimeout(() => fs.writeFileSync(storePath, JSON.stringify(store, null, 2)), 300);
 }
 
-let win, page, overlay, toast, animator, recorder;
+let win, page, overlay, toast, animator, recorder, liveCursor;
 let toastTimer;
 
 // Recording window, docked under the main window like the animation panel
@@ -75,6 +79,7 @@ function toUrl(input) {
 function layout() {
   const [width, height] = win.getContentSize();
   page.setBounds({ x: 0, y: 0, width, height });
+  liveCursor.setBounds({ x: 0, y: 0, width, height });
   overlay.setBounds({ x: 0, y: 0, width, height });
   const tw = 340;
   const th = 52;
@@ -239,6 +244,7 @@ async function applyScrollbarCss() {
 function showOverlay(mode) {
   if (overlayMode === mode) return hideOverlay();
   overlayMode = mode;
+  syncLiveCursor();
   const url = page.webContents.getURL();
   overlay.setVisible(true);
   overlay.webContents.focus();
@@ -251,6 +257,7 @@ function showOverlay(mode) {
 
 function hideOverlay() {
   overlayMode = null;
+  syncLiveCursor();
   overlay.setVisible(false);
   page.webContents.focus();
 }
@@ -320,12 +327,85 @@ function cursorPayload() {
   return { ...c, image };
 }
 
+// With the live cursor on, the page only ever sees the already-smoothed
+// pointer, so recordings just take the edge off frame timing.
+function recorderCursorPayload() {
+  const payload = cursorPayload();
+  return liveCursorState().on ? { ...payload, smoothing: LIVE_RECORD_SMOOTHING, damping: 1 } : payload;
+}
+
 function syncCursor() {
-  sendToRecorder('rec:cursor', cursorPayload());
+  sendToLiveCursor('live:cursor', cursorPayload());
+  syncLiveCursor();
 }
 
 function syncCursorSpans() {
-  sendToRecorder('rec:cursor-spans', trackFor(animationKey()).cursor);
+  const spans = trackFor(animationKey()).cursor;
+  sendToRecorder('rec:cursor-spans', spans);
+  sendToLiveCursor('live:cursor-spans', spans);
+}
+
+// ---- Live cursor -------------------------------------------------------------
+// With it on, a transparent view laid over the page takes the real mouse,
+// hides the system pointer and draws a smoothed one. The page is fed the
+// smoothed position instead of the real one (sendInputEvent), so hover effects
+// happen right under the drawn pointer, and clicks wait for it to arrive. Tab
+// capture only sees the page, so it never shows up in recordings, which draw
+// their own pointer.
+const LIVE_RECORD_SMOOTHING = 30; // ms; recordings of an already-smoothed pointer
+const liveCursorOpen = () => !!liveCursor && !liveCursor.webContents.isDestroyed();
+
+function liveCursorState() {
+  const keys = !!store.cursor.live;
+  return { keys, on: keys && store.cursor.smoothing > 0 && !overlayMode };
+}
+
+function sendToLiveCursor(channel, data) {
+  if (liveCursorOpen()) liveCursor.webContents.send(channel, data);
+}
+
+function syncLiveCursor() {
+  const state = liveCursorState();
+  page.webContents.send('cursor:live', state);
+  sendToRecorder('rec:cursor', recorderCursorPayload());
+  if (liveCursorOpen()) liveCursor.setVisible(state.on);
+}
+
+function createLiveCursor() {
+  liveCursor = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'cursor-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+  liveCursor.setBackgroundColor('#00000000');
+  liveCursor.setVisible(false);
+  liveCursor.webContents.loadFile(path.join(__dirname, 'cursor.html'));
+  // A click on the view takes keyboard focus from the page; hand it straight
+  // back (the page doesn't see the blur, see page-preload.js).
+  liveCursor.webContents.on('focus', () => {
+    if (!overlayMode) page.webContents.focus();
+  });
+}
+
+// Mouse input from the live cursor view, already smoothed, on to the page.
+function liveInput(ev) {
+  page.webContents.sendInputEvent(ev);
+}
+
+// [ and ] on the page step the smoothing down and up.
+function nudgeSmoothing(dir) {
+  const cur = store.cursor.smoothing || 0;
+  const next = dir > 0
+    ? SMOOTHING_STEPS.find((v) => v > cur) ?? SMOOTHING_STEPS[SMOOTHING_STEPS.length - 1]
+    : [...SMOOTHING_STEPS].reverse().find((v) => v < cur) ?? 0;
+  store.cursor = { ...store.cursor, smoothing: next };
+  save();
+  syncCursor();
+  sendToAnimator('anim:cursor', cursorPayload());
+  showToast(next ? `Cursor smoothing · ${next} ms` : 'Cursor smoothing off');
 }
 
 // Copies the chosen image into the app's data folder so it outlives the original.
@@ -769,10 +849,13 @@ function createWindow() {
   toast.setVisible(false);
   toast.webContents.loadFile(path.join(__dirname, 'toast.html'));
 
+  createLiveCursor();
   win.contentView.addChildView(page);
+  win.contentView.addChildView(liveCursor); // under the overlay and toast
   win.contentView.addChildView(overlay);
   win.contentView.addChildView(toast);
   layout();
+  syncLiveCursor();
   win.on('resize', layout);
   win.on('resize', schedulePreview);
   // The recording window follows the main window around.
@@ -908,6 +991,12 @@ ipcMain.on('anim:set', (_e, { key, stops, cursor }) => {
 });
 
 ipcMain.handle('cursor:get', cursorPayload);
+ipcMain.on('cursor:live-get', (e) => {
+  e.returnValue = liveCursorState();
+});
+ipcMain.on('cursor:nudge', (e, dir) => e.sender === page.webContents && nudgeSmoothing(dir));
+ipcMain.on('live:input', (e, ev) => liveCursorOpen() && e.sender === liveCursor.webContents && liveInput(ev));
+ipcMain.handle('live:init', () => ({ settings: cursorPayload(), spans: trackFor(animationKey()).cursor }));
 ipcMain.handle('cursor:pick', pickCursorImage);
 ipcMain.on('cursor:set', (_e, partial) => {
   store.cursor = { ...store.cursor, ...partial };
@@ -922,7 +1011,9 @@ ipcMain.on('anim:seek', (_e, y) => page.webContents.send('anim:seek', y));
 ipcMain.on('anim:progress', (_e, data) => {
   sendToAnimator('anim:progress', data);
   // The recorder times the pointer's cursor spans off playback.
-  sendToRecorder('rec:anim-progress', { playing: !!data.playing, elapsed: data.elapsed || 0 });
+  const anim = { playing: !!data.playing, elapsed: data.elapsed || 0 };
+  sendToRecorder('rec:anim-progress', anim);
+  sendToLiveCursor('live:anim-progress', anim);
   if (!!data.playing !== animPlaying) {
     animPlaying = !!data.playing;
     sendToRecorder('rec:event', { type: animPlaying ? 'anim-start' : 'anim-end', label: animPlaying ? 'Animation' : '' });
@@ -940,7 +1031,7 @@ ipcMain.handle('rec:init', () => ({
   height: store.recordHeight || 'native',
   blur: store.motionBlur || 0,
   viewport: viewportPixels(),
-  cursor: cursorPayload(),
+  cursor: recorderCursorPayload(),
   cursorSpans: trackFor(animationKey()).cursor,
 }));
 ipcMain.handle('rec:viewport', () => viewportPixels());
@@ -953,8 +1044,16 @@ ipcMain.on('rec:set-blur', (_e, deg) => {
   save();
 });
 ipcMain.on('rec:velocity', (e, v) => e.sender === page.webContents && sendToRecorder('rec:velocity', v));
-ipcMain.on('rec:pointer', (e, p) => e.sender === page.webContents && sendToRecorder('rec:pointer', p));
-ipcMain.on('rec:cursor-image', (e, img) => e.sender === page.webContents && sendToRecorder('rec:cursor-image', img));
+ipcMain.on('rec:pointer', (e, p) => {
+  if (e.sender !== page.webContents) return;
+  sendToRecorder('rec:pointer', p);
+  sendToLiveCursor('live:pointer', p);
+});
+ipcMain.on('rec:cursor-image', (e, img) => {
+  if (e.sender !== page.webContents) return;
+  sendToRecorder('rec:cursor-image', img);
+  sendToLiveCursor('live:cursor-image', img);
+});
 ipcMain.on('rec:set-reload', (_e, on) => {
   store.reloadOnRecord = !!on;
   save();

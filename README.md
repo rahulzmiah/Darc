@@ -32,6 +32,7 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 | ⌥⌘E | Recording window |
 | ⌘↩ | Play the page's scroll animation (Esc or scrolling stops it) |
 | ⌘K | Set a marker at the current scroll position |
+| [ / ] | Less / more cursor smoothing (with Live cursor on) |
 | Esc | Close the overlay |
 | ⌘R / ⇧⌘R | Reload / hard reload |
 | ⌘[ / ⌘] | Back / forward |
@@ -72,7 +73,9 @@ Animations are saved per page (origin + path).
 Tab capture has no pointer in it, so Darc draws one into the footage from where the mouse is over the page. The **Cursor** section of the animation panel has the settings (they apply to every recording):
 
 - **Page's cursor** follows the CSS `cursor` under the mouse: arrow, pointing hand over links, I-beam over text, and image cursors (`cursor: url(...)`) as the page defines them. Pages that hide the cursor to draw their own (`cursor: none`) are left to it, since theirs is already in the capture. **Arrow** always draws the arrow, and **Custom image** draws a PNG/SVG of your own with the hotspot at its top-left corner or center.
-- **Size** is the pointer's height in CSS px. **Smoothing** is how long the drawn pointer takes to settle on the real one, so hand movement reads as deliberate; **Damping** below 1 lets it overshoot a little, above 1 makes it trail. The box under the sliders lets you try the feel.
+- **Smoothing** is how long the drawn pointer takes to settle on the real one, so hand movement reads as deliberate; **Damping** below 1 lets it overshoot a little, above 1 makes it trail. The box under the sliders lets you try the feel.
+- **Live** smooths the real pointer, not just the drawn one. A transparent layer over the page takes the mouse, hides the system pointer and draws the smoothed one, and the page is fed that smoothed position as its mouse, so hover effects and animations happen right under the drawn pointer instead of ahead of it. Clicks wait for the pointer to glide to where you clicked, then land there; scrolling goes straight through. It never appears in recordings. With Live on, `[` and `]` step the smoothing down and up (outside text fields), and 0 brings the real pointer back.
+- The pointer uses the macOS 26 cursor set (arrow, pointing hand, I-beam over text, resize, zoom, grab and the rest), picked from the page's CSS `cursor`. **Size** 22 is macOS's own size.
 - With no spans on the Cursor track, the pointer shows whenever the mouse is over the page. With spans, it shows only inside them while the animation plays, fading in and out at each edge, so it can appear for a hover during a hold and disappear for the scrolls.
 
 ## Recording

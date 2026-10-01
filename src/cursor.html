@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; cursor: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="cursor-shapes.js"></script>
+<script src="cursor-layer.js"></script>
+<script>
+  // The live cursor. This view sits over the page and takes the real mouse,
+  // so the system pointer is hidden and the page never sees it. A spring
+  // smooths the movement; the smoothed position is drawn here and handed to the
+  // page as its mouse, so hover effects happen right under the drawn pointer.
+  // Button presses wait for the pointer to glide to where they happened.
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let layer = null;
+  let raf = 0;
+  let last = 0;
+  let dpr = devicePixelRatio || 1;
+
+  let mouse = null; // real pointer, CSS px
+  let modifiers = []; // keys held at the last real event
+  const held = new Set(); // buttons the page has been told are down
+  const queue = []; // button events waiting for the pointer: { ev, at: { x, y }, t }
+  let sent = null; // position last handed to the page, whole CSS px
+  let trackpad = { time: 0, on: false };
+
+  const BUTTONS = ['left', 'middle', 'right'];
+
+  function fit() {
+    dpr = devicePixelRatio || 1;
+    canvas.width = Math.round(innerWidth * dpr);
+    canvas.height = Math.round(innerHeight * dpr);
+    if (!layer) return;
+    layer.width = canvas.width;
+    layer.height = canvas.height;
+    layer.scale = dpr;
+    wake();
+  }
+
+  const send = (ev) => narc.input(ev);
+  const mods = () => [...modifiers, ...[...held].map((b) => `${b}ButtonDown`)];
+
+  function keysOf(e) {
+    const m = [];
+    if (e.shiftKey) m.push('shift');
+    if (e.ctrlKey) m.push('control');
+    if (e.altKey) m.push('alt');
+    if (e.metaKey) m.push('meta');
+    return m;
+  }
+
+  // Where the drawn pointer is heading: the next queued press if any, so it
+  // visits each spot it was clicked at in turn, else the real pointer.
+  function aim() {
+    const p = queue.length ? queue[0].at : mouse;
+    if (p) layer.moveTo(p.x * dpr, p.y * dpr, layer.inside);
+  }
+
+  function sendMove(x, y) {
+    x = Math.round(x);
+    y = Math.round(y);
+    if (sent && sent.x === x && sent.y === y) return;
+    sent = { x, y };
+    send({ type: 'mouseMove', x, y, modifiers: mods() });
+  }
+
+  function frame(now) {
+    const dt = Math.max(1 / 240, Math.min((now - last) / 1000, 1 / 20));
+    last = now;
+    aim();
+    layer.step(dt);
+    // Let queued presses through once the pointer is on their spot, or snap it
+    // there if it's taking longer than the smoothing allows.
+    const wait = Math.max(50, (layer.settings.smoothing || 0) * 1.5);
+    while (queue.length) {
+      const q = queue[0];
+      const near = Math.hypot(layer.pos.x / dpr - q.at.x, layer.pos.y / dpr - q.at.y) < 1.5;
+      if (!near && now - q.t < wait) break;
+      queue.shift();
+      if (!near) {
+        layer.pos = { x: q.at.x * dpr, y: q.at.y * dpr };
+        layer.vel = { x: 0, y: 0 };
+      }
+      sendMove(q.at.x, q.at.y);
+      if (q.ev.type === 'mouseDown') held.add(q.ev.button);
+      if (q.ev.type === 'mouseUp') held.delete(q.ev.button);
+      send({ ...q.ev, x: Math.round(q.at.x), y: Math.round(q.at.y), modifiers: mods() });
+      aim();
+    }
+    if (layer.pos) sendMove(layer.pos.x / dpr, layer.pos.y / dpr);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    layer.draw(ctx);
+    raf = layer.settled() && !queue.length ? 0 : requestAnimationFrame(frame);
+  }
+
+  function wake() {
+    if (raf || !layer) return;
+    last = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function track(e) {
+    mouse = { x: e.clientX, y: e.clientY };
+    modifiers = keysOf(e);
+  }
+
+  // The real pointer moved, or crossed the view's edge.
+  function place(x, y, inside) {
+    if (!layer) return;
+    const was = layer.inside;
+    mouse = { x, y };
+    if (inside && !was) {
+      // Coming back in from outside, appear where the mouse is rather than
+      // gliding over from where it left.
+      if (!queue.length) {
+        layer.pos = { x: x * dpr, y: y * dpr };
+        layer.vel = { x: 0, y: 0 };
+      }
+      layer.moveTo(layer.pos.x, layer.pos.y, true);
+    } else if (!inside && was) {
+      layer.inside = false;
+      queue.push({ ev: { type: 'mouseLeave' }, at: { x, y }, t: performance.now() });
+    }
+    wake();
+  }
+
+  addEventListener('mousemove', (e) => {
+    modifiers = keysOf(e);
+    place(e.clientX, e.clientY, true);
+  });
+  document.documentElement.addEventListener('mouseleave', (e) => {
+    if (mouse) place(e.clientX, e.clientY, false);
+  });
+  for (const [type, kind] of [['mousedown', 'mouseDown'], ['mouseup', 'mouseUp']]) {
+    addEventListener(type, (e) => {
+      if (!layer) return;
+      track(e);
+      queue.push({ ev: { type: kind, button: BUTTONS[e.button] || 'left', clickCount: e.detail || 1 }, at: { ...mouse }, t: performance.now() });
+      wake();
+    });
+  }
+  addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // Scrolling goes straight through, at the drawn pointer. Trackpad scrolls
+  // stay precise so the page's smooth scroller tells them from wheel notches.
+  addEventListener('wheel', (e) => {
+    if (!layer || !layer.pos) return;
+    e.preventDefault();
+    const now = performance.now();
+    if (now - trackpad.time > 120) {
+      trackpad.on = e.deltaMode === 0 && (
+        (e.wheelDeltaY !== 0 && Math.abs(e.wheelDeltaY + 3 * e.deltaY) < 1)
+        || (e.wheelDeltaX !== 0 && Math.abs(e.wheelDeltaX + 3 * e.deltaX) < 1)
+      );
+    }
+    trackpad.time = now;
+    send({
+      type: 'mouseWheel',
+      x: Math.round(layer.pos.x / dpr),
+      y: Math.round(layer.pos.y / dpr),
+      deltaX: -e.deltaX,
+      deltaY: -e.deltaY,
+      wheelTicksX: e.wheelDeltaX / 120,
+      wheelTicksY: e.wheelDeltaY / 120,
+      hasPreciseScrollingDeltas: trackpad.on,
+      canScroll: true,
+      modifiers: keysOf(e),
+    });
+  }, { passive: false });
+
+  narc.init().then(({ settings, spans }) => {
+    layer = new CursorLayer({ settings, spans, scale: 1, images: [], live: true }, 0, 0);
+    fit();
+  });
+  addEventListener('resize', fit);
+  narc.onPointer((p) => {
+    if (!layer) return;
+    layer.pointer(p);
+    wake();
+  });
+  narc.onCursorImage((img) => {
+    if (!layer) return;
+    layer.image(img);
+    wake();
+  });
+  narc.onCursor((c) => {
+    if (!layer) return;
+    layer.configure(c);
+    wake();
+  });
+  narc.onCursorSpans((spans) => {
+    if (!layer) return;
+    layer.setSpans(spans);
+    wake();
+  });
+  narc.onAnimProgress((p) => {
+    if (!layer) return;
+    layer.progress(p);
+    wake();
+  });
+</script>
+</body>
+</html>

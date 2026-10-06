@@ -42,6 +42,9 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 | ⌘4 / ⌘5 / ⌘6 / ⌘7 | Resize to 16:10: 1280×800 / 1440×900 / 1680×1050 / 1920×1200 (centered) |
 | ⌘= / ⌘- / ⌘0 | Page zoom |
 | ⌃⌘F | Fullscreen |
+| ⌥⌘I | Developer tools (in their own window, so the recorded viewport keeps its size) |
+| ⌥⌘C | Inspect element: pick an element on the page to edit its HTML and CSS in DevTools |
+| ⌃⌘C | Center the window |
 
 To move the window, open an overlay and drag along the top edge.
 

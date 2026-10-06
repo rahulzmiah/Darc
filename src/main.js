@@ -965,6 +965,35 @@ function playAnimation() {
   page.webContents.send('anim:play', stops, cue);
 }
 
+// DevTools get a window of their own: the live cursor view sits over the page
+// and forwards mouse input to it, so a docked panel can't be clicked (and
+// would shrink the recorded viewport anyway).
+function toggleDevTools() {
+  const wc = page.webContents;
+  if (wc.isDevToolsOpened()) wc.closeDevTools();
+  else wc.openDevTools({ mode: 'detach' });
+}
+
+// Like Chrome's ⌥⌘C: open DevTools if needed and toggle the element picker.
+function inspectElement() {
+  const wc = page.webContents;
+  const pick = (tries = 0) => {
+    const dt = wc.devToolsWebContents;
+    if (!dt || dt.isDestroyed()) return;
+    dt.executeJavaScript('DevToolsAPI.enterInspectElementMode()').catch(() => {
+      // The frontend is still loading.
+      if (tries < 50) setTimeout(() => pick(tries + 1), 100);
+    });
+  };
+  if (wc.isDevToolsOpened()) pick();
+  else {
+    wc.once('devtools-opened', () => pick());
+    wc.openDevTools({ mode: 'detach' });
+  }
+  win.focus();
+  wc.focus();
+}
+
 function buildMenu() {
   const nav = (fn) => () => fn(page.webContents.navigationHistory);
   const template = [
@@ -1003,7 +1032,8 @@ function buildMenu() {
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => page.webContents.setZoomLevel(page.webContents.getZoomLevel() - 0.5) },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: () => page.webContents.toggleDevTools() },
+        { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: toggleDevTools },
+        { label: 'Inspect Element', accelerator: 'Alt+CmdOrCtrl+C', click: inspectElement },
       ],
     },
     {
@@ -1051,7 +1081,7 @@ function buildMenu() {
           },
         ]),
         { type: 'separator' },
-        { label: 'Center', accelerator: 'CmdOrCtrl+Alt+C', click: () => win.center() },
+        { label: 'Center', accelerator: 'Ctrl+CmdOrCtrl+C', click: () => win.center() },
         { type: 'separator' },
         { role: 'minimize' },
       ],

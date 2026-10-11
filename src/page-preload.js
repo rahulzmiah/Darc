@@ -286,8 +286,11 @@ function play(stops, cue) {
     t += Math.max(0, stop.hold);
   });
   const cueAt = cue != null && segments[cue * 2] ? segments[cue * 2].end : null;
-  playback = { segments, total: t, start: performance.now(), raf: 0, cueAt, paused: null, tick: null };
+  playback = { segments, total: t, start: performance.now(), raf: 0, cueAt, paused: null, tick: null, path: location.pathname };
   const tick = (now) => {
+    // A single-page app (Barba, Swup…) changed page without loading one: the
+    // timeline belongs to the old page, and the new one resets its own scroll.
+    if (location.pathname !== playback.path) return stopPlayback();
     let elapsed = now - playback.start;
     const cued = playback.cueAt != null && elapsed >= playback.cueAt;
     if (cued) elapsed = playback.cueAt;
@@ -318,6 +321,7 @@ function play(stops, cue) {
 // rest of the line's hold and the next move start there instead of jumping back.
 function resumePlayback() {
   if (!playback || playback.paused == null) return;
+  if (location.pathname !== playback.path) return stopPlayback();
   const el = root();
   const elapsed = playback.paused;
   const y = el.scrollTop;

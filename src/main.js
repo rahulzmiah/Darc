@@ -1009,6 +1009,67 @@ function inspectElement() {
   wc.focus();
 }
 
+// ---- Clearing data -------------------------------------------------------------
+function confirmClear(message, detail, button) {
+  return dialog.showMessageBoxSync(win, {
+    type: 'warning',
+    message,
+    detail,
+    buttons: [button, 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+  }) === 0;
+}
+
+// Cache, cookies, site storage and history, like a browser's Clear Browsing Data.
+async function clearBrowsingData() {
+  if (!confirmClear('Clear browsing data?', 'Cache, cookies, site storage (local storage, IndexedDB, service workers) and history are removed. Sites will be signed out.', 'Clear')) return;
+  const wc = page.webContents;
+  await Promise.all([wc.session.clearCache(), wc.session.clearStorageData()]);
+  wc.navigationHistory.clear();
+  store.lastUrl = '';
+  save();
+  if (wc.getURL().startsWith('http')) wc.reload();
+  showToast('Browsing data cleared');
+}
+
+// Every timeline and cursor path Darc has saved for the current site, across
+// all of its pages (and http/https, any port).
+function clearSiteData() {
+  let host;
+  try {
+    const u = new URL(page.webContents.getURL());
+    if (u.protocol.startsWith('http')) host = u.hostname;
+  } catch {}
+  if (!host) return showToast('Open a page first · ⌘L');
+  const onSite = (key) => {
+    try {
+      return new URL(key).hostname === host;
+    } catch {
+      return false;
+    }
+  };
+  const animKeys = Object.keys(store.animations).filter(onSite);
+  const pathKeys = Object.keys(store.paths).filter(onSite);
+  const pages = new Set([...animKeys, ...pathKeys]).size;
+  if (!pages) return showToast(`Nothing saved for ${host}`);
+  const what = [
+    animKeys.length && `${animKeys.length} timeline${animKeys.length === 1 ? '' : 's'} (markers and cursor spans)`,
+    pathKeys.length && `${pathKeys.length} cursor path${pathKeys.length === 1 ? '' : 's'}`,
+  ].filter(Boolean).join(' and ');
+  if (!confirmClear(`Clear Darc data for ${host}?`, `${what} across ${pages} page${pages === 1 ? '' : 's'} will be deleted. This can't be undone.`, 'Clear')) return;
+  stopAnimation();
+  closePathView();
+  for (const k of animKeys) delete store.animations[k];
+  for (const k of pathKeys) delete store.paths[k];
+  save();
+  markerVisitKey = null;
+  if (markerPrompt) dismissToast();
+  syncCursorSpans();
+  sendToAnimator('anim:page-changed');
+  showToast(`Cleared ${pages} page${pages === 1 ? '' : 's'} on ${host}`);
+}
+
 function buildMenu() {
   const nav = (fn) => () => fn(page.webContents.navigationHistory);
   const template = [
@@ -1083,6 +1144,13 @@ function buildMenu() {
             shell.openPath(recordingsDir());
           },
         },
+      ],
+    },
+    {
+      label: 'Data',
+      submenu: [
+        { label: 'Clear Browsing Data…', accelerator: 'Shift+CmdOrCtrl+Backspace', click: clearBrowsingData },
+        { label: 'Clear Darc Data for This Site…', click: clearSiteData },
       ],
     },
     {

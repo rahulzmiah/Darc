@@ -46,6 +46,7 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 | ⌥⌘I | Developer tools (in their own window, so the recorded viewport keeps its size) |
 | ⌥⌘C | Inspect element: pick an element on the page to edit its HTML and CSS in DevTools |
 | ⌃⌘C | Center the window |
+| ⇧⌘⌫ | Clear browsing data: cache, cookies, site storage and history |
 
 To move the window, open an overlay and drag along the top edge.
 
@@ -72,7 +73,9 @@ Mouse wheel and trackpad have separate speed multipliers. Pages that already use
 - The options below sit in collapsible sections: **Lines** (each line's position, duration and hold), **Easing** (presets or a custom cubic-bezier, shared by every line) and **Cursor**.
 - ⌘Z undoes any edit (new lines, moves, reorders, deletions, timing, easing and cursor spans); ⇧⌘Z redoes.
 
-Animations are saved per page (origin + path).
+Animations are saved per page (origin + path). **Data › Clear Darc Data for This Site…** deletes every timeline and cursor path saved for the current site's pages at once.
+
+When a single-page site (Barba, Swup and the like) changes page mid-animation, the animation stops, so the new page's own scroll reset isn't overridden.
 
 ## Cursor paths
 

@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('narc', {
   play: () => ipcRenderer.send('anim:play'),
   stop: () => ipcRenderer.send('anim:stop'),
   seek: (y) => ipcRenderer.send('anim:seek', y),
+  drive: (t) => ipcRenderer.send('anim:drive', t),
+  timeline: (preview) => ipcRenderer.send('anim:timeline', preview),
+  onTrack: (cb) => ipcRenderer.on('anim:track', (_e, data) => cb(data)),
+  onPath: (cb) => ipcRenderer.on('anim:path', (_e, data) => cb(data)),
   close: () => ipcRenderer.send('anim:close'),
   record: () => ipcRenderer.send('rec:toggle'),
   onRecordState: (cb) => ipcRenderer.on('rec:state', (_e, on) => cb(on)),
@@ -22,4 +26,5 @@ contextBridge.exposeInMainWorld('narc', {
   cursorSetEntry: (id, partial) => ipcRenderer.send('cursor:set-entry', id, partial),
   onCursorLibrary: (cb) => ipcRenderer.on('anim:cursor-library', (_e, lib) => cb(lib)),
   onCursor: (cb) => ipcRenderer.on('anim:cursor', (_e, c) => cb(c)),
+  menu: (items) => ipcRenderer.invoke('ctx:menu', items),
 });

@@ -28,6 +28,7 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 | ⌘L | URL bar (paste a URL or search terms) |
 | ⌘, | Scroll settings |
 | ⌘. | Animation panel |
+| ⌘T | Timeline |
 | ⌘E | Record / stop recording |
 | ⌥⌘E | Recording window |
 | ⌘↩ | Play the page's cursor path, or its scroll animation (Esc or scrolling stops it) |
@@ -50,6 +51,8 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 
 To move the window, open an overlay and drag along the top edge.
 
+Right-click for menus: on the page (back, forward, reload, copy, set a marker or click marker there, inspect element), and on lines, keyframes, path points and blocks, clicks, cursor spans, cursor images and the editor's Video track (delete, click here, easing, when the path starts, reorder, trim). They run the same edits as the buttons and keys, so ⌘Z undoes them.
+
 ## Scrolling
 
 Wheel, trackpad, arrow, space, PageUp/PageDown, and Home/End scrolling all run through one animator (`src/page-preload.js`):
@@ -63,19 +66,32 @@ Mouse wheel and trackpad have separate speed multipliers. Pages that already use
 
 ## Scroll animations
 
-⌘. opens the animation panel in its own window, showing a full-length capture of the current page.
+⌘. opens the animation panel in its own window, showing a full-length capture of the current page. Captures are kept per page and window size, so reloading or coming back to a page shows its capture straight away; **Refresh** takes a new one.
 
 - Click the preview to drop a numbered line. Each line is the top of the frame the page scrolls to. Drag lines to move them, or type exact pixel values.
 - Playback starts from wherever the page currently is and eases to each line in order. Drag the ⋮⋮ handle on a line's card to reorder.
-- Each move has its own duration, easing (presets or a custom cubic-bezier), and a hold before the next move, all in seconds.
+- Each move has its own duration, easing (presets or a custom cubic-bezier), and a hold before the next move, all in seconds. A new line eases like the last one, and **Use on all lines** gives every line the selected one's curve.
 - **Play** (or space in the panel, or ⌘↩ anywhere) runs it in the main window immediately. **Refresh** recaptures the page after it changes.
+- The **Scroll** track draws where the page is over time, so each move's easing and the holds read at a glance. Drag it or the ruler to scrub: the page jumps to that moment (the pointer too, inside a cursor path), and stays in step with the playhead while you edit. **Timeline** (or P, which also starts a preview) opens the timeline below.
 - The timeline at the top of the right panel lays the moves and holds out in time. The **Cursor** track under it is where you drag out spans for when the recorded pointer is shown (see below); drag a span to move it, its edges to resize, ✕ or ⌫ to remove.
-- The options below sit in collapsible sections: **Lines** (each line's position, duration and hold), **Easing** (presets or a custom cubic-bezier, shared by every line) and **Cursor**.
+- The options below sit in collapsible sections: **Lines** (each line's position, duration and hold), **Easing** (the selected line's preset or custom cubic-bezier) and **Cursor**.
 - ⌘Z undoes any edit (new lines, moves, reorders, deletions, timing, easing and cursor spans); ⇧⌘Z redoes.
 
 Animations are saved per page (origin + path). **Data › Clear Darc Data for This Site…** deletes every timeline and cursor path saved for the current site's pages at once.
 
 When a single-page site (Barba, Swup and the like) changes page mid-animation, the animation stops, so the new page's own scroll reset isn't overridden.
+
+## Timeline
+
+⌘T (or P in the animation panel) opens the page's animation as a timeline, docked under the browser like After Effects' layers. Drag the bar along its bottom edge to make it taller; the tracks grow with it. Everything on it shares one clock, which is also what cursor spans and recordings time against.
+
+- **Scroll** has two keyframes per line: a filled diamond where its move arrives and a hollow one where its hold ends, on the curve of where the page is. Drag a keyframe to retime it. The keyframes either side stay put, so the move and hold trade time; hold ⇧ to push everything after along instead. Keyframes snap to each other and the playhead.
+- **Path** is the cursor path as a block, with its points and clicks. Drag the block onto a line's arrival to start it there, or to the start to play it right away. A hatched lead-in shows the page gliding to where the path begins. Drag a point to retime the move into it (⇧ pushes the later points along).
+- **Cursor** holds the spans the pointer shows for: drag on empty track to add one, drag a span or its edges to change it.
+- Space previews on the page from the playhead, looping with **Loop** on. The preview reads the timeline every frame, so a drag or a new value plays straight away. **▶ Play** runs it for real, clicks and all. The ruler scrubs, ←/→ step a frame (⇧ a second), and J/K jump between keyframes. ⌘-scroll or pinch zooms, scrolling pans, and \ fits it all.
+- The inspector on the right edits the selection: a line's position, move, hold and easing (drag the curve's handles, or pick a preset), a path point's move, pause, ease and click, when the path starts, or a span's times.
+- While the playhead is in the path, the path and the pointer show on the page, and the pointer fades with the cursor spans as it will in the recording. Drag points and handles there as in the ⌘P editor. Space, ⌘Z and the arrow keys still go to the timeline.
+- ⌘Z / ⇧⌘Z undo and redo every edit, including those made in the animation panel and the path editor. The preview starts from the top, as a recording that reloads the page does, and doesn't click.
 
 ## Cursor paths
 
@@ -122,9 +138,12 @@ Tab capture has no pointer in it, so Darc draws one into the footage from where 
 
 Stopping a recording opens it in the editor instead of saving it straight away. Nothing lands in `~/Movies/Darc/` until you press **Save** (⌘S).
 
+- The **Scroll** and **Path** tracks show what each animation played, where it played in the footage: each line's move and hold, and the cursor path with its points and clicks. Click a block to change it in the **Animation** section: a line's position, move, hold and easing, when the path starts, or a point's move, pause, ease and click (and how long after the pointer arrives it clicks). Drag blocks, keyframes and points to retime them (⇧ pushes later ones along), ⌘ or ⇧-click lines to move or delete several at once, ⌫ deletes the selection (lines, a point, or the whole path), and drag a click onto another point. With the path or a point selected, the path is drawn over the video, where its points and handles can be dragged as in the ⌘P editor, and dragging the curve moves the whole path. The Path block can be dragged to start anywhere in a line's hold (snapping to the line's arrival), not just as the line arrives. Dragging an animation's first line moves the whole animation, for re-recording. The grip above the timeline makes it taller. The trim and cursor spans snap to the keyframes.
+- These changes are saved to the page's track straight away (and to disk on **Save**), so they're what plays from now on (⌘. and ⌘T show them too), but the footage is what was recorded: **Re-record** films it again. It reloads the first page, plays each animation in the same order with the same pauses between them, follows path clicks onto the next page (or opens it when its turn comes), stops after the last one, and opens the new take with this one's cursor style. Anything done by hand between animations isn't repeated. **Revert** puts the animations back as they were recorded. **Preview changes** plays the recording retimed to follow the changes (roughly, where it stretches the footage), with the pointer on the changed path. Trim and the cursor are applied when saving.
 - The video plays with the cursor drawn over it, exactly as it will be saved. Space plays the kept part, ← / → step a frame (⇧ for a second), and clicking or dragging the ruler or Video track scrubs.
 - **Cursor**: change its style (page's cursor, arrow, custom image or off), size, smoothing and damping for this video. The Cursor track shows when it's visible, starting out as when it would have shown while recording; drag on the track to add a span, drag a span to move it or its edges to resize it, ⌫ to remove one. **As recorded / Always / Never** reset the spans.
 - **Trim**: drag the yellow handles on the Video track, type the start and end, or press I and O to start or end at the playhead.
+- **Cuts**: drag across the Video track to pick a stretch (a pause, a page loading between clicks) and press ⌫ (or ✂ Cut) to take it out. The timeline closes up over it, so the animation, cursor spans and everything after stay with their footage; playing skips it and saving leaves it out. Click a red seam and press ⌫ to put a cut back.
 - ⌘Z / ⇧⌘Z undo and redo any edit. Edits are kept with the recording, so one kept for later reopens as it was left.
 - **Save** re-encodes the kept part with the cursor drawn on, to `~/Movies/Darc/` under the recording's name (saving again replaces it). With the cursor hidden throughout and nothing trimmed, the recording is copied as it is instead. **Discard** throws the recording away (press it twice).
 - Closing the editor without saving asks whether to discard the recording or keep it in Unsaved; **Record › Open Recording…** (⌘O) opens it again later, and also opens other MP4s for trimming. **Record › Edit Last Recording** brings back the last one.

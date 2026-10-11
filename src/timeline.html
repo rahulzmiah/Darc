@@ -1,0 +1,1439 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Timeline</title>
+<style>
+  * { box-sizing: border-box; margin: 0; border-radius: 0 !important; }
+  html, body { height: 100%; overflow: hidden; background: #0b0b0b; }
+  html { border: 1px solid #2a2a2a; }
+  body {
+    display: flex; flex-direction: column;
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    color: #ededed;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  input, select { font: inherit; color: inherit; }
+
+  header {
+    flex: none; height: 36px; padding: 0 10px 0 14px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid #1f1f1f;
+    -webkit-app-region: drag;
+  }
+  header h1 { font-size: 12px; font-weight: 600; letter-spacing: 0.02em; margin-right: 6px; }
+  header button, header label { -webkit-app-region: no-drag; }
+  .btn { padding: 3px 9px; border: 1px solid #333; color: #bbb; white-space: nowrap; }
+  .btn:hover { color: #fff; border-color: #555; }
+  .btn:disabled { opacity: 0.35; pointer-events: none; }
+  .btn.on { color: #fff; border-color: #fff; }
+  .btn.primary { background: #fff; color: #000; border-color: #fff; }
+  .btn.primary:hover { background: #ddd; }
+  #time { color: #888; font-variant-numeric: tabular-nums; margin-left: 6px; }
+  #time b { color: #fff; font-weight: 600; }
+  .flex { flex: 1; }
+  .check { display: flex; align-items: center; gap: 5px; color: #888; cursor: pointer; }
+  .check input { margin: 0; accent-color: #ff4d2e; }
+  #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
+  #grip { flex: none; height: 9px; cursor: ns-resize; border-top: 1px solid #1f1f1f; display: flex; align-items: center; justify-content: center; }
+  #grip::after { content: ""; width: 36px; height: 3px; background: #333; }
+  #grip:hover::after, body.resizing #grip::after { background: #4da3ff; }
+  body.resizing, body.resizing * { cursor: ns-resize !important; }
+  #close:hover { color: #fff; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #labels { flex: none; width: 84px; position: relative; border-right: 1px solid #1f1f1f; }
+  .label { position: absolute; left: 0; right: 0; padding: 0 10px; display: flex; flex-direction: column; justify-content: center; color: #888; font-size: 11px; }
+  .label small { color: #555; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #area { flex: 1; position: relative; min-width: 0; }
+  #c { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #empty { position: absolute; left: 0; right: 0; top: 30px; text-align: center; color: #555; pointer-events: none; }
+
+  #inspector { flex: none; width: 236px; border-left: 1px solid #1f1f1f; padding: 10px 12px; overflow-y: auto; }
+  #inspector::-webkit-scrollbar { width: 0; }
+  #inspector h3 { font-size: 12px; font-weight: 600; color: #ddd; margin-bottom: 8px; display: flex; gap: 6px; align-items: baseline; }
+  #inspector h3 span { color: #666; font-weight: 400; }
+  .row { display: grid; grid-template-columns: 52px 1fr 18px; gap: 6px; align-items: center; margin-top: 5px; }
+  .row label { color: #888; }
+  .row .unit { color: #555; font-size: 11px; }
+  .num, .sel {
+    width: 100%; padding: 2px 5px; background: #0b0b0b; border: 1px solid #2a2a2a; outline: 0;
+    font-variant-numeric: tabular-nums; user-select: text;
+  }
+  .num { text-align: right; }
+  .num:focus, .sel:focus { border-color: #555; }
+  .num:disabled, .sel:disabled { opacity: 0.35; }
+  .row .sel { grid-column: 2 / -1; }
+  #curve { display: block; width: 100%; height: 104px; margin-top: 8px; background: #050505; border: 1px solid #1f1f1f; cursor: default; }
+  .bez { color: #555; font-size: 10px; font-variant-numeric: tabular-nums; margin-top: 3px; display: flex; justify-content: space-between; }
+  .bez button { color: #888; }
+  .bez button:hover { color: #fff; }
+  .actions { display: flex; gap: 6px; margin-top: 10px; }
+  .note { color: #555; font-size: 11px; margin-top: 8px; }
+  .keys { color: #666; font-size: 11px; line-height: 1.7; }
+  .keys b { color: #999; font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Timeline</h1>
+  <button class="btn" id="preview" title="Preview on the page from the playhead (space)">Preview</button>
+  <button class="btn primary" id="play" title="Play it for real, with clicks (⌘↩)">▶ Play</button>
+  <label class="check" title="Start over when the preview reaches the end"><input type="checkbox" id="loop" checked>Loop</label>
+  <span id="time"></span>
+  <span class="flex"></span>
+  <button class="btn" id="fit" title="Fit the whole animation (\)">Fit</button>
+  <button id="close" title="Close (⌘T)">×</button>
+</header>
+<main>
+  <div id="labels"></div>
+  <div id="area"><canvas id="c"></canvas><div id="empty"></div></div>
+  <aside id="inspector"></aside>
+</main>
+<div id="grip" title="Drag to make the timeline taller or shorter"></div>
+
+<script src="cursor-path.js"></script>
+<script src="track-model.js"></script>
+<script>
+  // The page's animation in time: the scroll track's keyframes (each line's
+  // arrival and departure), the cursor path as a block with its points, and
+  // the spans the cursor shows for. The playhead drives the page; edits play
+  // straight away. One undo history covers all three.
+  const EASINGS = [
+    ['Linear', [0, 0, 1, 1]],
+    ['Ease', [0.25, 0.1, 0.25, 1]],
+    ['Ease in-out · sine', [0.37, 0, 0.63, 1]],
+    ['Ease in-out · cubic', [0.65, 0, 0.35, 1]],
+    ['Ease in-out · quint', [0.83, 0, 0.17, 1]],
+    ['Ease in-out · expo', [0.87, 0, 0.13, 1]],
+    ['Ease out · cubic', [0.33, 1, 0.68, 1]],
+    ['Ease out · expo', [0.16, 1, 0.3, 1]],
+    ['Ease in · cubic', [0.32, 0, 0.67, 0]],
+  ];
+  const PATH_EASES = [['recorded', 'As recorded'], ['ease', 'Ease in-out'], ['out', 'Ease out'], ['linear', 'Linear']];
+  const ROWS = {
+    ruler: { y: 0, h: 22 },
+    scroll: { y: 28, h: 72, label: 'Scroll' },
+    path: { y: 106, h: 34, label: 'Path' },
+    cursor: { y: 146, h: 26, label: 'Cursor' },
+  };
+  const BLUE = '#4da3ff';
+  const AMBER = '#f5b942';
+  const RED = '#ff4d2e';
+  const MIN_MOVE = 50; // ms, shortest a scroll move can be dragged to
+  const MIN_PATH_MOVE = 30; // ms, and a move between path points
+  const FRAME = 1000 / 60;
+  const PREVIEW_GAP = 600; // ms to rest on the end before the loop starts over
+  const SNAP_PX = 6;
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('c');
+  const ctx = canvas.getContext('2d');
+  const inspector = $('inspector');
+  const copy = (o) => JSON.parse(JSON.stringify(o));
+  const sameCurve = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+  const fmt = (ms) => (ms / 1000).toFixed(2);
+  const round3 = (v) => Math.round(v * 1000) / 1000;
+
+  let key = null;
+  let stops = [];
+  let spans = [];
+  let path = null;
+  let L = TrackModel.layout([], null);
+  let yRange = { lo: 0, hi: 1 };
+  let head = 0; // ms
+  let parked = false; // the page shows the playhead's moment, so edits redraw it there
+  let sel = null; // { kind: 'line' | 'anchor' | 'path' | 'span', i }
+  let previewing = null; // { last, raf, gap }
+  let progress = { playing: false };
+  let view = { t0: 0, span: 1000, auto: true };
+  let drag = null;
+
+  for (const row of Object.values(ROWS)) {
+    if (!row.label) continue;
+    row.el = document.createElement('div');
+    row.el.className = 'label';
+    row.el.style.top = `${row.y}px`;
+    row.el.style.height = `${row.h}px`;
+    row.el.innerHTML = `${row.label}<small></small>`;
+    $('labels').appendChild(row.el);
+  }
+
+  // ---- Model ---------------------------------------------------------------
+  function relayout() {
+    L = TrackModel.layout(stops, path);
+    // The scroll row spans every position the page passes through.
+    let lo = Infinity, hi = -Infinity;
+    for (let k = 0; k <= 300; k++) {
+      const y = L.yAt((L.total * k) / 300);
+      lo = Math.min(lo, y);
+      hi = Math.max(hi, y);
+    }
+    for (const s of stops) {
+      lo = Math.min(lo, s.y);
+      hi = Math.max(hi, s.y);
+    }
+    yRange = Number.isFinite(lo) ? { lo, hi: Math.max(hi, lo + 1) } : { lo: 0, hi: 1 };
+    head = Math.max(0, Math.min(head, L.total));
+    if (view.auto) fitView();
+  }
+
+  // Clamp spans to the animation, drop empty ones and merge any that overlap.
+  function normalizeSpans() {
+    const total = L.total;
+    const sorted = spans
+      .map((s) => ({ start: Math.max(0, Math.min(total, Math.round(s.start))), end: Math.max(0, Math.min(total, Math.round(s.end))) }))
+      .filter((s) => s.end - s.start >= 1)
+      .sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const s of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+      else merged.push(s);
+    }
+    spans = merged;
+  }
+
+  let trackTimer, pathTimer;
+  // After an edit: lay it out again, save it, and show it on the page.
+  function changed({ track = false, path: pathEdit = false } = {}) {
+    relayout();
+    if (track) {
+      clearTimeout(trackTimer);
+      trackTimer = setTimeout(() => narc.save(key, stops, spans), 150);
+    }
+    if (pathEdit && path) {
+      clearTimeout(pathTimer);
+      pathTimer = setTimeout(() => narc.savePath(key, path), 150);
+    }
+    if (sel && !selectionExists()) select(null);
+    if (parked && !previewing && !progress.playing) narc.drive(head);
+    render();
+  }
+
+  function selectionExists() {
+    if (sel.kind === 'line') return !!stops[sel.i];
+    if (sel.kind === 'anchor') return !!(path && path.anchors[sel.i]);
+    if (sel.kind === 'path') return !!path;
+    if (sel.kind === 'span') return !!spans[sel.i];
+    return false;
+  }
+
+  // ---- Undo ----------------------------------------------------------------
+  // A snapshot before each change; rapid repeats of one edit collapse into one.
+  const history = { undo: [], redo: [] };
+  let lastEdit = { tag: null, time: 0 };
+  const snapshot = () => ({ stops: copy(stops), spans: copy(spans), path: path ? copy(path) : null });
+
+  function pushSnapshot(snap) {
+    history.undo.push(snap);
+    if (history.undo.length > 200) history.undo.shift();
+    history.redo.length = 0;
+  }
+
+  function record(tag) {
+    const now = performance.now();
+    if (tag && lastEdit.tag === tag && now - lastEdit.time < 1000) {
+      lastEdit.time = now;
+      return;
+    }
+    lastEdit = { tag, time: now };
+    pushSnapshot(snapshot());
+  }
+
+  function restore(snap) {
+    const pathEdit = !!snap.path && JSON.stringify(snap.path) !== JSON.stringify(path);
+    // Undoing back past a deletion brings the path back; redoing one deletes it again.
+    if (!snap.path && path) narc.deletePath(key);
+    stops = snap.stops;
+    spans = snap.spans;
+    path = snap.path;
+    lastEdit = { tag: null, time: 0 };
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    changed({ track: true, path: pathEdit });
+  }
+
+  function undo() {
+    const snap = history.undo.pop();
+    if (!snap) return;
+    history.redo.push(snapshot());
+    restore(snap);
+  }
+
+  function redo() {
+    const snap = history.redo.pop();
+    if (!snap) return;
+    history.undo.push(snapshot());
+    restore(snap);
+  }
+
+  // ---- View ----------------------------------------------------------------
+  const W = () => canvas.clientWidth;
+  const X = (t) => ((t - view.t0) / view.span) * W();
+  const T = (x) => view.t0 + (x / W()) * view.span;
+
+  function fitView() {
+    const s = Math.max(L.total, 1000);
+    view.span = s * 1.04;
+    view.t0 = -s * 0.015;
+  }
+
+  function rowAt(y) {
+    for (const [name, r] of Object.entries(ROWS)) if (y >= r.y && y < r.y + r.h) return name;
+    return null;
+  }
+
+  const py = (y) => {
+    const r = ROWS.scroll;
+    return r.y + 7 + ((y - yRange.lo) / (yRange.hi - yRange.lo)) * (r.h - 14);
+  };
+
+  // Where a line's keyframe sits: its arrival at the line, its departure
+  // wherever the page is by then (a path in its hold may have moved it).
+  const keyY = (i, which) => py(which === 'arrive' ? stops[i].y : L.yAt(Math.max(0, L.lines[i].depart - 0.5)));
+
+  // Every keyframe's time, for snapping and for J / K.
+  function keyTimes(except) {
+    const ts = [0, L.total];
+    L.lines.forEach((ln, i) => {
+      if (!(except && except.kind === 'key' && except.i === i && except.which === 'arrive')) ts.push(ln.arrive);
+      if (!(except && except.kind === 'key' && except.i === i && except.which === 'depart')) ts.push(ln.depart);
+    });
+    if (L.path) {
+      ts.push(L.path.start, L.path.body, L.path.end);
+      L.path.tl.arrivals.forEach((a, j) => {
+        if (!(except && except.kind === 'anchor' && except.i === j)) ts.push(L.path.body + a);
+      });
+    }
+    for (const s of spans) ts.push(s.start, s.end);
+    return ts;
+  }
+
+  function snap(t, except, withHead = true) {
+    const tol = (SNAP_PX / W()) * view.span;
+    let best = t, d = tol;
+    for (const k of withHead ? [...keyTimes(except), head] : keyTimes(except)) {
+      if (Math.abs(k - t) < d) {
+        d = Math.abs(k - t);
+        best = k;
+      }
+    }
+    return best;
+  }
+
+  // ---- Drawing -------------------------------------------------------------
+  const TICKS = [100, 250, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000];
+
+  function render() {
+    draw();
+    renderHeader();
+    renderLabels();
+    renderInspector();
+  }
+
+  function draw() {
+    const dpr = devicePixelRatio || 1;
+    const w = W(), h = canvas.clientHeight;
+    if (!w || !h) return;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    for (const name of ['scroll', 'path', 'cursor']) {
+      const r = ROWS[name];
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, r.y, w, r.h);
+    }
+    drawRuler(w);
+    if (key) {
+      drawScroll(w);
+      drawPath(w);
+      drawCursor(w);
+      // Past the end.
+      const xe = Math.max(0, X(L.total));
+      if (xe < w) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillRect(xe, ROWS.scroll.y, w - xe, ROWS.cursor.y + ROWS.cursor.h - ROWS.scroll.y);
+      }
+      drawPlayhead(h);
+    }
+  }
+
+  function drawRuler(w) {
+    const r = ROWS.ruler;
+    const step = TICKS.find((s) => (s / view.span) * w >= 56) || TICKS[TICKS.length - 1];
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (let t = Math.max(0, Math.ceil(view.t0 / step) * step); t <= view.t0 + view.span; t += step) {
+      const x = Math.round(X(t)) + 0.5;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(x - 0.5, r.y + r.h - 5, 1, 5);
+      ctx.fillStyle = '#666';
+      ctx.fillText(t >= 60000 ? `${Math.floor(t / 60000)}:${String(Math.floor((t % 60000) / 1000)).padStart(2, '0')}` : `${+(t / 1000).toFixed(2)}s`, x, r.y + 4);
+    }
+    // Minor ticks.
+    const minor = step / 5;
+    ctx.fillStyle = '#222';
+    for (let t = Math.max(0, Math.ceil(view.t0 / minor) * minor); t <= view.t0 + view.span; t += minor) {
+      ctx.fillRect(Math.round(X(t)), r.y + r.h - 3, 1, 3);
+    }
+  }
+
+  function diamond(x, y, size, fill, stroke) {
+    ctx.beginPath();
+    ctx.moveTo(x, y - size);
+    ctx.lineTo(x + size, y);
+    ctx.lineTo(x, y + size);
+    ctx.lineTo(x - size, y);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = stroke;
+    ctx.stroke();
+  }
+
+  function drawScroll(w) {
+    const r = ROWS.scroll;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, r.y, w, r.h);
+    ctx.clip();
+    // Moves, holds, and the path's stretch.
+    for (const s of L.segs) {
+      const x0 = X(s.start), x1 = X(s.end);
+      if (x1 < 0 || x0 > w) continue;
+      const on = sel && sel.kind === 'line' && sel.i === s.i;
+      if (s.kind === 'move') ctx.fillStyle = on ? 'rgba(255, 255, 255, 0.16)' : 'rgba(77, 163, 255, 0.13)';
+      else if (s.kind === 'hold') ctx.fillStyle = on ? 'rgba(255, 255, 255, 0.06)' : 'rgba(255, 255, 255, 0.025)';
+      else ctx.fillStyle = 'rgba(245, 185, 66, 0.08)';
+      ctx.fillRect(x0, r.y, Math.max(1, x1 - x0), r.h);
+      if (s.kind === 'move' && x1 - x0 > 16) {
+        ctx.fillStyle = on ? '#fff' : 'rgba(207, 230, 255, 0.7)';
+        ctx.font = '600 10px -apple-system, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(String(s.i + 1), x0 + 4, r.y + 3);
+      }
+    }
+    // The page's position over time: down the row as the page scrolls down.
+    if (L.total > 0) {
+      ctx.beginPath();
+      const xa = Math.max(0, X(0)), xb = Math.min(w, X(L.total));
+      for (let x = xa; x <= xb + 0.01; x += 1.5) {
+        const y = py(L.yAt(Math.min(L.total, T(x))));
+        if (x === xa) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#8cc4ff';
+      ctx.stroke();
+    }
+    if (L.pathOnly && stops.length) {
+      ctx.fillStyle = '#666';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('Lines skipped: the path starts right away · drag it onto a line', w - 8, r.y + r.h - 4);
+    }
+    // Keyframes: each line's arrival and departure.
+    L.lines.forEach((ln, i) => {
+      const on = sel && sel.kind === 'line' && sel.i === i;
+      const y = keyY(i, 'arrive');
+      const fill = on ? '#fff' : BLUE;
+      diamond(X(ln.depart), keyY(i, 'depart'), 4.5, on ? '#fff' : '#0b0b0b', fill);
+      diamond(X(ln.arrive), y, 5, fill, '#0b0b0b');
+      if (stops[i].click) {
+        ctx.beginPath();
+        ctx.arc(X(ln.arrive), y - 10, 3, 0, Math.PI * 2);
+        ctx.fillStyle = RED;
+        ctx.fill();
+      }
+    });
+    ctx.restore();
+  }
+
+  function drawPath(w) {
+    const r = ROWS.path;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, r.y, w, r.h);
+    ctx.clip();
+    if (!path) {
+      ctx.fillStyle = '#555';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('No cursor path · ⇧⌘E on the page captures one', Math.max(8, X(0) + 8), r.y + r.h / 2);
+    } else if (L.path) {
+      const b = L.path;
+      const on = sel && sel.kind === 'path';
+      const top = r.y + 3, bh = r.h - 6;
+      // The glide to where the path begins.
+      if (b.body > b.start) {
+        ctx.fillStyle = 'rgba(245, 185, 66, 0.1)';
+        ctx.fillRect(X(b.start), top, X(b.body) - X(b.start), bh);
+        ctx.strokeStyle = 'rgba(245, 185, 66, 0.25)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let x = X(b.start) - bh; x < X(b.body); x += 6) {
+          ctx.moveTo(Math.max(X(b.start), x), top + bh - Math.max(0, X(b.start) - x));
+          ctx.lineTo(Math.min(X(b.body), x + bh), top + Math.max(0, x + bh - X(b.body)));
+        }
+        ctx.stroke();
+      }
+      ctx.fillStyle = on ? 'rgba(245, 185, 66, 0.42)' : 'rgba(245, 185, 66, 0.24)';
+      ctx.fillRect(X(b.body), top, X(b.end) - X(b.body), bh);
+      // Rests at points: dwell as recorded, pauses added.
+      for (const p of b.tl.pieces) {
+        if (p.kind === 'move') continue;
+        ctx.fillStyle = p.kind === 'pause' ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.08)';
+        ctx.fillRect(X(b.body + p.start), top + bh * 0.3, Math.max(1, X(b.body + p.start + p.len) - X(b.body + p.start)), bh * 0.4);
+      }
+      ctx.strokeStyle = on ? '#fff' : AMBER;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(X(b.start)) + 0.5, top + 0.5, Math.max(1, X(b.end) - X(b.start) - 1), bh - 1);
+      // Clicks.
+      for (const e of b.tl.events) {
+        if (e.type !== 'down') continue;
+        ctx.beginPath();
+        ctx.arc(X(b.body + e.T), top + bh - 5, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = RED;
+        ctx.fill();
+      }
+      // Points.
+      b.tl.arrivals.forEach((a, j) => {
+        const x = X(b.body + a), y = top + bh / 2 - 2;
+        const s = sel && sel.kind === 'anchor' && sel.i === j;
+        ctx.fillStyle = s ? BLUE : '#fff';
+        ctx.strokeStyle = s ? '#fff' : '#0b0b0b';
+        ctx.fillRect(x - 3.5, y - 3.5, 7, 7);
+        ctx.strokeRect(x - 3.5, y - 3.5, 7, 7);
+      });
+    }
+    // Where a dragged path would start.
+    if (drag && drag.kind === 'path' && drag.target && L.path) {
+      const len = L.path.end - L.path.start;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = '#fff';
+      ctx.strokeRect(Math.round(X(drag.target.t)) + 0.5, r.y + 1.5, Math.max(4, X(drag.target.t + len) - X(drag.target.t)), r.h - 3);
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
+  function drawCursor(w) {
+    const r = ROWS.cursor;
+    spans.forEach((sp, j) => {
+      const x0 = X(sp.start), x1 = X(sp.end);
+      if (x1 < 0 || x0 > w) return;
+      const on = sel && sel.kind === 'span' && sel.i === j;
+      ctx.fillStyle = on ? 'rgba(255, 77, 46, 0.65)' : 'rgba(255, 77, 46, 0.35)';
+      ctx.fillRect(x0, r.y + 3, Math.max(3, x1 - x0), r.h - 6);
+      ctx.strokeStyle = RED;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(x0) + 0.5, r.y + 3.5, Math.max(3, x1 - x0) - 1, r.h - 7);
+    });
+    if (!spans.length) {
+      ctx.fillStyle = '#444';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Shown throughout · drag here for when it shows', Math.max(8, X(0) + 8), r.y + r.h / 2);
+    }
+  }
+
+  const playT = () => (progress.playing ? Math.min(progress.elapsed, L.total) : head);
+
+  function drawPlayhead(h) {
+    const x = Math.round(X(playT())) + 0.5;
+    ctx.fillStyle = RED;
+    ctx.fillRect(x - 0.5, ROWS.ruler.y + 10, 1, h);
+    ctx.beginPath();
+    ctx.moveTo(x - 5, ROWS.ruler.y + 6);
+    ctx.lineTo(x + 5, ROWS.ruler.y + 6);
+    ctx.lineTo(x + 5, ROWS.ruler.y + 12);
+    ctx.lineTo(x, ROWS.ruler.y + 17);
+    ctx.lineTo(x - 5, ROWS.ruler.y + 12);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function renderHeader() {
+    $('time').innerHTML = `<b>${fmt(playT())}</b> / ${fmt(L.total)} s`;
+    $('preview').textContent = previewing ? '■ Preview' : 'Preview';
+    $('preview').classList.toggle('on', !!previewing);
+    $('preview').disabled = !L.total;
+    $('play').textContent = progress.playing ? '■ Stop' : '▶ Play';
+    $('play').disabled = !key || (!stops.length && !path);
+    $('empty').textContent = !key
+      ? 'Open a page in the main window (⌘L)'
+      : !stops.length && !path
+        ? 'Nothing to animate yet: ⌘K on the page sets a line, ⇧⌘E captures a cursor path'
+        : '';
+  }
+
+  function renderLabels() {
+    const lines = stops.length ? `${stops.length} line${stops.length === 1 ? '' : 's'}` : 'No lines';
+    ROWS.scroll.el.querySelector('small').textContent = lines;
+    ROWS.path.el.querySelector('small').textContent = !path ? 'None' : L.pathOnly ? 'Right away' : `At line ${path.startAfter + 1}`;
+    ROWS.cursor.el.querySelector('small').textContent = spans.length ? `${spans.length} span${spans.length === 1 ? '' : 's'}` : 'Always';
+  }
+
+  // ---- Inspector -----------------------------------------------------------
+  const num = (f, value, { step = 0.05, min = 0, disabled = false, unit = 's' } = {}) => `<div class="row"><label>${{ y: 'Y', duration: 'Move', hold: 'Hold', move: 'Move', pause: 'Pause', sstart: 'From', send: 'To' }[f]}</label>
+    <input class="num" data-f="${f}" type="number" step="${step}" min="${min}" value="${value}"${disabled ? ' disabled' : ''}><span class="unit">${unit}</span></div>`;
+
+  function renderInspector() {
+    const focused = inspector.contains(document.activeElement) && document.activeElement.matches('input, select');
+    if (focused && inspector.dataset.sel === JSON.stringify(sel)) return syncInspector();
+    inspector.dataset.sel = JSON.stringify(sel);
+    if (!sel) {
+      inspector.innerHTML = `<h3>Timeline</h3><div class="keys">
+        <b>Drag</b> a keyframe to retime it<br>
+        <b>⇧-drag</b> pushes everything after<br>
+        <b>Drag</b> the path onto a line's arrival<br>
+        <b>Drag</b> in Cursor for when it shows<br>
+        <b>Space</b> preview · <b>←/→</b> frame<br>
+        <b>J / K</b> previous / next keyframe<br>
+        <b>⌫</b> delete · <b>⌘Z</b> undo<br>
+        <b>⌘-scroll</b> zoom · <b>\\</b> fit</div>`;
+      return;
+    }
+    if (sel.kind === 'line') {
+      const s = stops[sel.i];
+      const preset = EASINGS.findIndex(([, e]) => sameCurve(e, s.easing));
+      inspector.innerHTML = `<h3>Line ${sel.i + 1}<span>${s.click ? 'scroll, click' : 'scroll to'}</span></h3>
+        ${num('y', s.y, { step: 1, unit: 'px' })}
+        ${num('duration', s.duration / 1000)}
+        ${num('hold', s.hold / 1000)}
+        <div class="row"><label>Ease</label><select class="sel" data-f="preset">${EASINGS.map(([n], j) => `<option value="${j}"${j === preset ? ' selected' : ''}>${n}</option>`).join('')}<option value="custom"${preset < 0 ? ' selected' : ''}>Custom</option></select></div>
+        <canvas id="curve" title="Drag the handles to shape this move"></canvas>
+        <div class="bez"><span id="bez-text"></span><button data-act="ease-all" title="Give every line this easing">Use on all</button></div>`;
+      drawCurve();
+    } else if (sel.kind === 'anchor') {
+      const a = path.anchors[sel.i];
+      const seg = path.segments[sel.i];
+      const piece = L.path && L.path.tl.pieces.find((p) => p.kind === 'move' && p.i === sel.i);
+      const clicks = a.buttons.some((b) => b.type === 'down');
+      inspector.innerHTML = `<h3>Point ${sel.i + 1}<span>of ${path.anchors.length}</span></h3>
+        ${num('move', seg && piece ? +(piece.len / 1000).toFixed(2) : '', { disabled: !seg })}
+        ${num('pause', +(a.pause / 1000).toFixed(2))}
+        <div class="row"><label>Ease</label><select class="sel" data-f="pease"${seg ? '' : ' disabled'}>${PATH_EASES.map(([v, n]) => `<option value="${v}"${seg && (seg.ease || 'recorded') === v ? ' selected' : ''}>${n}</option>`).join('')}</select></div>
+        <div class="actions"><button class="btn${clicks ? ' on' : ''}" data-act="click" title="Click at this point (C on the page)">${clicks ? 'Clicks here' : 'Click here'}</button></div>
+        <p class="note">Move is the time to the next point. Drag points on the page while the playhead is in the path.</p>`;
+    } else if (sel.kind === 'path') {
+      const b = L.path;
+      inspector.innerHTML = `<h3>Cursor path<span>${b ? `${fmt(b.end - b.body)} s` : ''}</span></h3>
+        <div class="row"><label>Starts</label><select class="sel" data-f="start"><option value="">Right away</option>${stops.map((s, i) => `<option value="${i}"${path.startAfter === i ? ' selected' : ''}>At line ${i + 1} · ${s.y}px</option>`).join('')}</select></div>
+        ${TrackModel.cueOf(stops, path) != null ? `<div class="row"><label>Delay</label><input class="num" data-f="pdelay" type="number" step="0.05" min="0" value="${+(TrackModel.cueDelay(stops, path) / 1000).toFixed(2)}" title="How far into the line's hold it starts"><span class="unit">s</span></div>` : ''}
+        <p class="note">At a line, it plays as the move there ends, and the line's hold carries on from wherever it leaves the page. Its points are edited on the page while the playhead is in it.</p>`;
+    } else if (sel.kind === 'span') {
+      const sp = spans[sel.i];
+      inspector.innerHTML = `<h3>Cursor shown</h3>
+        ${num('sstart', +(sp.start / 1000).toFixed(2))}
+        ${num('send', +(sp.end / 1000).toFixed(2))}
+        <div class="actions"><button class="btn" data-act="remove-span">Remove</button></div>`;
+    }
+  }
+
+  // Keep the fields current while one of them is being typed in.
+  function syncInspector() {
+    for (const inp of inspector.querySelectorAll('.num')) {
+      if (inp === document.activeElement) continue;
+      const f = inp.dataset.f;
+      if (sel.kind === 'line') inp.value = f === 'y' ? stops[sel.i].y : stops[sel.i][f] / 1000;
+    }
+    if (sel.kind === 'line') drawCurve();
+  }
+
+  inspector.addEventListener('input', (e) => {
+    const f = e.target.dataset.f;
+    if (!f || !sel) return;
+    const v = parseFloat(e.target.value);
+    if (sel.kind === 'line') {
+      const s = stops[sel.i];
+      if (f === 'preset') {
+        if (e.target.value === 'custom') return;
+        e.target.blur();
+        return setEasing(sel.i, EASINGS[+e.target.value][1]);
+      }
+      if (Number.isNaN(v)) return;
+      record(`${f}:${sel.i}`);
+      if (f === 'y') s.y = Math.max(0, Math.round(v));
+      else s[f] = Math.round(Math.max(f === 'duration' ? 0.05 : 0, v) * 1000);
+      changed({ track: true });
+    } else if (sel.kind === 'anchor') {
+      if (f === 'pease') {
+        record();
+        path.segments[sel.i].ease = e.target.value;
+        e.target.blur();
+      } else {
+        if (Number.isNaN(v)) return;
+        record(`${f}:a${sel.i}`);
+        if (f === 'pause') path.anchors[sel.i].pause = Math.max(0, Math.round(v * 1000));
+        else {
+          const a = path.anchors[sel.i], b = path.anchors[sel.i + 1];
+          const recorded = b.t - (a.t + a.dwell);
+          if (recorded <= 0) return;
+          path.segments[sel.i].scale = Math.max(0.05, round3((Math.max(MIN_PATH_MOVE / 1000, v) * 1000) / recorded));
+        }
+      }
+      changed({ path: true });
+    } else if (sel.kind === 'path' && f === 'pdelay') {
+      if (Number.isNaN(v)) return;
+      record('pdelay');
+      const ms = Math.round(Math.max(0, v) * 1000);
+      if (ms) path.startDelay = ms;
+      else delete path.startDelay;
+      changed({ path: true });
+    } else if (sel.kind === 'path' && f === 'start') {
+      e.target.blur();
+      setPathStart(e.target.value === '' ? null : +e.target.value);
+    } else if (sel.kind === 'span') {
+      if (Number.isNaN(v)) return;
+      record(`${f}:s${sel.i}`);
+      spans[sel.i][f === 'sstart' ? 'start' : 'end'] = Math.round(v * 1000);
+      if (spans[sel.i].start > spans[sel.i].end) return;
+      normalizeSpans();
+      changed({ track: true });
+    }
+  });
+
+  inspector.addEventListener('click', (e) => {
+    const act = e.target.closest('[data-act]');
+    if (!act || !sel) return;
+    act.blur();
+    if (act.dataset.act === 'ease-all') {
+      easeAll(sel.i);
+    } else if (act.dataset.act === 'click') {
+      toggleClick(sel.i);
+    } else if (act.dataset.act === 'remove-span') {
+      deleteSelection();
+    }
+  });
+
+  function setEasing(i, easing) {
+    record();
+    stops[i].easing = [...easing];
+    changed({ track: true });
+  }
+
+  // Every line gets line i's easing.
+  function easeAll(i) {
+    record();
+    for (const s of stops) s.easing = [...stops[i].easing];
+    changed({ track: true });
+  }
+
+  // When the path plays: right away (null) or at line i.
+  function setPathStart(i) {
+    record();
+    if (i == null) delete path.startAfter;
+    else path.startAfter = i;
+    delete path.startDelay;
+    changed({ path: true });
+  }
+
+  // A click at a path point, as the ⌘P editor sets one.
+  function toggleClick(i) {
+    record();
+    const a = path.anchors[i];
+    if (a.buttons.some((b) => b.type === 'down')) a.buttons = [];
+    else {
+      a.buttons = [{ at: 0, wait: 0, type: 'down', button: 'left', count: 1 }, { at: Math.min(a.dwell, 90), wait: a.dwell >= 90 ? 0 : 90, type: 'up', button: 'left', count: 1 }];
+      if (a.dwell < 90) a.pause = Math.max(a.pause, 150);
+    }
+    inspector.dataset.sel = '';
+    changed({ path: true });
+  }
+
+  // The selected line's easing: drag either handle.
+  const CURVE_LO = -0.3, CURVE_HI = 1.3;
+  function curveBox() {
+    const c = $('curve');
+    const w = c.clientWidth, h = c.clientHeight;
+    const pad = 10;
+    const ix = (x) => pad + x * (w - 2 * pad);
+    const iy = (y) => h - pad - ((y - CURVE_LO) / (CURVE_HI - CURVE_LO)) * (h - 2 * pad);
+    return { c, w, h, ix, iy, pad };
+  }
+
+  function drawCurve() {
+    const c = $('curve');
+    if (!c || !sel || sel.kind !== 'line') return;
+    const { w, h, ix, iy } = curveBox();
+    const dpr = devicePixelRatio || 1;
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const [x1, y1, x2, y2] = stops[sel.i].easing;
+    g.strokeStyle = '#222';
+    g.strokeRect(ix(0), iy(1), ix(1) - ix(0), iy(0) - iy(1));
+    g.strokeStyle = '#555';
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(ix(0), iy(0));
+    g.lineTo(ix(x1), iy(y1));
+    g.moveTo(ix(1), iy(1));
+    g.lineTo(ix(x2), iy(y2));
+    g.stroke();
+    g.beginPath();
+    g.moveTo(ix(0), iy(0));
+    g.bezierCurveTo(ix(x1), iy(y1), ix(x2), iy(y2), ix(1), iy(1));
+    g.strokeStyle = '#fff';
+    g.lineWidth = 2;
+    g.stroke();
+    for (const [x, y] of [[x1, y1], [x2, y2]]) {
+      g.beginPath();
+      g.arc(ix(x), iy(y), 4.5, 0, Math.PI * 2);
+      g.fillStyle = BLUE;
+      g.fill();
+    }
+    const text = $('bez-text');
+    if (text) text.textContent = stops[sel.i].easing.map((v) => +v.toFixed(2)).join(', ');
+  }
+
+  let curveDrag = null;
+  inspector.addEventListener('mousedown', (e) => {
+    if (e.target.id !== 'curve' || !sel || sel.kind !== 'line') return;
+    const { c, ix, iy } = curveBox();
+    const r = c.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const [x1, y1, x2, y2] = stops[sel.i].easing;
+    const d1 = Math.hypot(ix(x1) - mx, iy(y1) - my), d2 = Math.hypot(ix(x2) - mx, iy(y2) - my);
+    curveDrag = { h: d1 <= d2 ? 0 : 2 };
+    e.preventDefault();
+    moveCurve(e);
+  });
+  function moveCurve(e) {
+    const { c, w, h, pad } = curveBox();
+    const r = c.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (e.clientX - r.left - pad) / (w - 2 * pad)));
+    const y = Math.max(CURVE_LO, Math.min(CURVE_HI, CURVE_LO + ((h - pad - (e.clientY - r.top)) / (h - 2 * pad)) * (CURVE_HI - CURVE_LO)));
+    record(`curve:${sel.i}`);
+    const easing = [...stops[sel.i].easing];
+    easing[curveDrag.h] = round3(x);
+    easing[curveDrag.h + 1] = round3(y);
+    stops[sel.i].easing = easing;
+    const preset = inspector.querySelector('[data-f="preset"]');
+    const j = EASINGS.findIndex(([, ez]) => sameCurve(ez, easing));
+    if (preset) preset.value = j < 0 ? 'custom' : j;
+    changed({ track: true });
+  }
+
+  // ---- Selection and the playhead -------------------------------------------
+  function select(next) {
+    const was = sel;
+    sel = next;
+    if ((was && was.kind === 'anchor') || (sel && sel.kind === 'anchor')) narc.selectAnchor(sel && sel.kind === 'anchor' ? sel.i : null);
+    render();
+  }
+
+  function scrubTo(t) {
+    stopPreview();
+    if (progress.playing) narc.stop();
+    head = Math.max(0, Math.min(L.total, t));
+    parked = true;
+    narc.drive(head);
+    draw();
+    renderHeader();
+  }
+
+  function startPreview() {
+    if (!key || !L.total) return;
+    if (progress.playing) narc.stop();
+    if (head >= L.total - 1) head = 0;
+    parked = true;
+    previewing = { last: performance.now(), raf: 0, gap: 0 };
+    previewing.raf = requestAnimationFrame(previewFrame);
+    renderHeader();
+  }
+
+  function stopPreview() {
+    if (!previewing) return;
+    cancelAnimationFrame(previewing.raf);
+    previewing = null;
+    renderHeader();
+  }
+
+  function togglePreview() {
+    if (previewing) stopPreview();
+    else startPreview();
+  }
+
+  // The preview reads the track every frame, so edits play as they're made.
+  let lastDriven = null;
+  function previewFrame(now) {
+    const p = previewing;
+    if (!p) return;
+    const dt = now - p.last;
+    p.last = now;
+    if (p.gap > 0) {
+      p.gap -= dt;
+      if (p.gap <= 0) head = 0;
+    } else {
+      head += dt;
+      if (head >= L.total) {
+        head = L.total;
+        if ($('loop').checked) p.gap = PREVIEW_GAP;
+        else {
+          narc.drive(head);
+          stopPreview();
+          draw();
+          return;
+        }
+      }
+    }
+    if (head !== lastDriven) {
+      narc.drive(head);
+      lastDriven = head;
+    }
+    draw();
+    renderHeader();
+    p.raf = requestAnimationFrame(previewFrame);
+  }
+
+  function jump(dir) {
+    const ts = [...new Set(keyTimes().map((t) => Math.round(t)))].sort((a, b) => a - b);
+    const t = dir > 0 ? ts.find((k) => k > head + 0.5) : [...ts].reverse().find((k) => k < head - 0.5);
+    if (t != null) scrubTo(t);
+  }
+
+  function deleteSelection() {
+    if (!sel) return;
+    if (sel.kind === 'line') {
+      record();
+      const i = sel.i;
+      stops = TrackModel.removeLines(stops, new Set([i]));
+      // Keep the path on the same line.
+      let pathEdit = false;
+      if (path && path.startAfter != null && path.startAfter >= i) {
+        if (path.startAfter > i) path.startAfter--;
+        else if (i > 0) path.startAfter = i - 1;
+        else if (!stops.length) delete path.startAfter;
+        pathEdit = true;
+      }
+      sel = stops.length ? { kind: 'line', i: Math.min(i, stops.length - 1) } : null;
+      changed({ track: true, path: pathEdit });
+    } else if (sel.kind === 'span') {
+      record();
+      spans.splice(sel.i, 1);
+      sel = null;
+      changed({ track: true });
+    } else if (sel.kind === 'anchor') {
+      if (sel.i === 0 || sel.i === path.anchors.length - 1) return;
+      record();
+      path = CursorPath.removeAnchor(path, sel.i);
+      select(null);
+      changed({ path: true });
+    } else if (sel.kind === 'path') {
+      // The whole path; ⌘Z brings it back.
+      record();
+      path = null;
+      select(null);
+      narc.deletePath(key);
+      changed();
+    }
+  }
+
+  function handleKey(k, shift) {
+    if (k === ' ') togglePreview();
+    else if (k === 'Escape') {
+      if (previewing) stopPreview();
+      else if (progress.playing) narc.stop();
+      else select(null);
+    } else if (k === 'ArrowLeft' || k === 'ArrowRight') scrubTo(head + (k === 'ArrowLeft' ? -1 : 1) * (shift ? 1000 : FRAME));
+    else if (k === 'j' || k === 'J') jump(-1);
+    else if (k === 'k' || k === 'K') jump(1);
+    else if (k === 'Home') scrubTo(0);
+    else if (k === 'End') scrubTo(L.total);
+    else if (k === 'Backspace' || k === 'Delete') deleteSelection();
+    else if (k === '\\') {
+      view.auto = true;
+      fitView();
+      draw();
+    } else if ((k === 'c' || k === 'C') && sel && sel.kind === 'anchor') toggleClick(sel.i);
+    else return false;
+    return true;
+  }
+
+  addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if (e.target.matches('input, select')) {
+      if (e.key === 'Enter' || e.key === 'Escape') e.target.blur();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (handleKey(e.key, e.shiftKey)) e.preventDefault();
+  });
+
+  // ---- Mouse ---------------------------------------------------------------
+  function hit(x, y) {
+    const row = rowAt(y);
+    const t = T(x);
+    if (row === 'ruler') return { kind: 'ruler' };
+    if (row === 'scroll') {
+      let best = null;
+      L.lines.forEach((ln, i) => {
+        for (const which of ['arrive', 'depart']) {
+          const dx = Math.abs(X(ln[which]) - x);
+          if (Math.abs(keyY(i, which) - y) <= 9 && dx <= 6 && (!best || dx < best.d)) best = { kind: 'key', i, which, d: dx };
+        }
+      });
+      if (best) return best;
+      const s = L.segs.find((sg) => t >= sg.start && t < sg.end);
+      if (s && (s.kind === 'move' || s.kind === 'hold')) return { kind: 'line', i: s.i };
+      if (s) return { kind: 'path' };
+      return { kind: 'empty' };
+    }
+    if (row === 'path' && L.path) {
+      let best = null;
+      L.path.tl.arrivals.forEach((a, j) => {
+        const dx = Math.abs(X(L.path.body + a) - x);
+        if (dx <= 5 && (!best || dx < best.d)) best = { kind: 'anchor', i: j, d: dx };
+      });
+      if (best) return best;
+      if (t >= L.path.start && t <= L.path.end) return { kind: 'path' };
+      return { kind: 'empty' };
+    }
+    if (row === 'cursor') {
+      for (let j = spans.length - 1; j >= 0; j--) {
+        const x0 = X(spans[j].start), x1 = Math.max(X(spans[j].end), x0 + 3);
+        if (x < x0 - 3 || x > x1 + 3) continue;
+        const mode = x - x0 <= 5 ? 'start' : x1 - x <= 5 ? 'end' : 'move';
+        return { kind: 'span', i: j, mode };
+      }
+      return { kind: 'cursor' };
+    }
+    return { kind: 'empty' };
+  }
+
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  // ---- Right-click ----------------------------------------------------------
+  // Selects what's under the pointer as a click would, then offers the same
+  // edits as the inspector and keys.
+  function contextItems(h) {
+    if (h.kind === 'key' || h.kind === 'line') {
+      const s = stops[h.i];
+      return [
+        { id: 'delete', label: `Delete line ${h.i + 1}`, accelerator: 'Backspace' },
+        { type: 'separator' },
+        { label: 'Ease', submenu: EASINGS.map(([n, ez], j) => ({ id: `ease:${j}`, label: n, checked: sameCurve(ez, s.easing) })) },
+        { id: 'ease-all', label: 'Use this easing on all lines', enabled: stops.length > 1 },
+      ];
+    }
+    if (h.kind === 'anchor') {
+      const ends = h.i === 0 || h.i === path.anchors.length - 1;
+      return [
+        { id: 'click', label: path.anchors[h.i].buttons.some((b) => b.type === 'down') ? 'Remove click' : 'Click here', accelerator: 'C' },
+        { type: 'separator' },
+        { id: 'delete', label: 'Delete point', accelerator: 'Backspace', enabled: !ends },
+      ];
+    }
+    if (h.kind === 'path') {
+      return [{
+        label: 'Starts',
+        submenu: [
+          { id: 'start:', label: 'Right away', checked: path.startAfter == null },
+          ...stops.map((s, i) => ({ id: `start:${i}`, label: `At line ${i + 1}`, checked: path.startAfter === i })),
+        ],
+      }, { type: 'separator' }, { id: 'delete', label: 'Delete path', accelerator: 'Backspace' }];
+    }
+    if (h.kind === 'span') return [{ id: 'delete', label: 'Delete span', accelerator: 'Backspace' }];
+    return [
+      { id: 'preview', label: 'Preview from here', accelerator: 'Space', enabled: L.total > 0 },
+      { id: 'fit', label: 'Fit', accelerator: '\\' },
+    ];
+  }
+
+  function contextSelect(h) {
+    if (h.kind === 'key' || h.kind === 'line') select({ kind: 'line', i: h.i });
+    else if (h.kind === 'anchor' || h.kind === 'span') select({ kind: h.kind, i: h.i });
+    else if (h.kind === 'path') select({ kind: 'path' });
+  }
+
+  function contextAction(id, h, t) {
+    if (!id) return;
+    if (id === 'delete') deleteSelection();
+    else if (id === 'click') toggleClick(h.i);
+    else if (id === 'ease-all') easeAll(h.i);
+    else if (id.startsWith('ease:')) setEasing(h.i, EASINGS[+id.slice(5)][1]);
+    else if (id.startsWith('start:')) setPathStart(id === 'start:' ? null : +id.slice(6));
+    else if (id === 'preview') {
+      scrubTo(t);
+      startPreview();
+    } else if (id === 'fit') handleKey('\\');
+  }
+
+  canvas.addEventListener('contextmenu', async (e) => {
+    e.preventDefault();
+    if (!key || drag) return;
+    const { x, y } = pos(e);
+    const h = hit(x, y);
+    const t = T(x);
+    contextSelect(h);
+    const id = await narc.menu(contextItems(h));
+    // An edit from another window may have removed it while the menu was up.
+    if (id && (!sel || selectionExists())) contextAction(id, h, t);
+  });
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !key) return;
+    e.preventDefault();
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    const { x, y } = pos(e);
+    const h = hit(x, y);
+    const t = T(x);
+    const base = { snap: snapshot(), stops: copy(stops), path: path ? copy(path) : null, L };
+    if (h.kind === 'ruler' || h.kind === 'empty') {
+      if (h.kind === 'empty') select(null);
+      drag = { kind: 'scrub' };
+      scrubTo(t);
+    } else if (h.kind === 'key') {
+      select({ kind: 'line', i: h.i });
+      drag = { kind: 'key', i: h.i, which: h.which, origin: L.lines[h.i][h.which], x0: x, base, moved: false };
+    } else if (h.kind === 'line') {
+      // A click scrubs; holding and dragging moves the line's block.
+      select({ kind: 'line', i: h.i });
+      scrubTo(t);
+      drag = { kind: 'block', i: h.i, x0: x, t0: t, base, moved: false };
+    } else if (h.kind === 'anchor') {
+      select({ kind: 'anchor', i: h.i });
+      scrubTo(L.path.body + L.path.tl.arrivals[h.i]);
+      drag = h.i > 0 ? { kind: 'anchor', i: h.i, origin: L.path.body + L.path.tl.arrivals[h.i], x0: x, base, moved: false } : { kind: 'scrub' };
+    } else if (h.kind === 'path') {
+      select({ kind: 'path' });
+      scrubTo(t);
+      drag = { kind: 'path', grab: t - L.path.start, x0: x, base, moved: false, target: null };
+    } else if (h.kind === 'span') {
+      select({ kind: 'span', i: h.i });
+      drag = { kind: 'span', mode: h.mode, i: h.i, anchor: t, origin: { ...spans[h.i] }, base, moved: false };
+    } else if (h.kind === 'cursor') {
+      const s = snap(t, null, false);
+      spans.push({ start: s, end: s });
+      sel = { kind: 'span', i: spans.length - 1 };
+      drag = { kind: 'span', mode: 'create', i: spans.length - 1, anchor: s, base, moved: false };
+      draw();
+    }
+  });
+
+  // Scroll keyframes: an arrival moves the end of its line's move and a
+  // departure the end of its hold. The keyframes either side stay put, unless
+  // shift is held, which pushes everything after along instead.
+  function retimeLine(base, i, which, d, ripple) {
+    const st = copy(base);
+    const s = st[i];
+    if (which === 'arrive') {
+      let dd = Math.max(MIN_MOVE, s.duration + d) - s.duration;
+      if (!ripple) {
+        dd = Math.min(dd, s.hold);
+        s.hold -= dd;
+      }
+      s.duration += dd;
+    } else {
+      let dd = Math.max(0, s.hold + d) - s.hold;
+      if (!ripple && st[i + 1]) {
+        dd = Math.min(dd, st[i + 1].duration - MIN_MOVE);
+        st[i + 1].duration -= dd;
+      }
+      s.hold += dd;
+    }
+    for (const x of st) {
+      x.duration = Math.round(x.duration);
+      x.hold = Math.round(x.hold);
+    }
+    return st;
+  }
+
+  // A path point: the move into it stretches, and the move out of it gives
+  // the time back so later points stay put (shift: they move along).
+  function retimeAnchor(base, j, d, ripple) {
+    const p = copy(base);
+    const a = p.anchors;
+    const rec = (k) => a[k + 1].t - (a[k].t + a[k].dwell);
+    const plen = (k) => rec(k) * (p.segments[k].scale || 1);
+    const k = j - 1;
+    if (rec(k) <= 0) return p;
+    const before = plen(k);
+    let dd = Math.max(MIN_PATH_MOVE, before + d) - before;
+    if (!ripple && p.segments[j] && rec(j) > 0) {
+      const after = plen(j);
+      dd = Math.min(dd, after - MIN_PATH_MOVE);
+      p.segments[j].scale = round3((after - dd) / rec(j));
+    }
+    p.segments[k].scale = round3((before + dd) / rec(k));
+    return p;
+  }
+
+
+  addEventListener('mousemove', (e) => {
+    if (curveDrag) return moveCurve(e);
+    if (!drag) {
+      if (e.target !== canvas) return;
+      const { x, y } = pos(e);
+      const h = hit(x, y);
+      canvas.style.cursor = h.kind === 'key' || h.kind === 'anchor' ? 'ew-resize'
+        : h.kind === 'span' ? (h.mode === 'move' ? 'grab' : 'ew-resize')
+          : h.kind === 'path' || h.kind === 'line' ? 'grab'
+            : h.kind === 'cursor' ? 'crosshair' : 'default';
+      return;
+    }
+    const { x } = pos(e);
+    const t = T(x);
+    if (drag.kind === 'scrub') return scrubTo(t);
+    if (!drag.moved && drag.kind !== 'span' && Math.abs(x - drag.x0) < 2) return;
+    const first = !drag.moved;
+    drag.moved = true;
+    if (drag.kind === 'block') {
+      // The hold before it gives or takes the time, and its own hold the
+      // opposite, so the next line stays put (⇧: everything after moves along).
+      if (drag.i === 0) return;
+      const st = copy(drag.base.stops);
+      const from = drag.base.L.lines[drag.i].start;
+      const want = snap(from + (t - drag.t0), { kind: 'key', i: drag.i, which: 'arrive' }) - from;
+      let dd = Math.max(want, -st[drag.i - 1].hold);
+      if (!e.shiftKey) dd = Math.min(dd, st[drag.i].hold);
+      st[drag.i - 1].hold = Math.round(st[drag.i - 1].hold + dd);
+      if (!e.shiftKey) st[drag.i].hold = Math.round(st[drag.i].hold - dd);
+      stops = st;
+      changed();
+    } else if (drag.kind === 'key') {
+      let target = snap(drag.origin + (t - T(drag.x0)), { kind: 'key', i: drag.i, which: drag.which });
+      let d = target - drag.origin;
+      // A line without a hold has both keyframes in one place: pick by direction.
+      if (first && drag.base.stops[drag.i].hold === 0) drag.which = d > 0 ? 'depart' : 'arrive';
+      stops = retimeLine(drag.base.stops, drag.i, drag.which, d, e.shiftKey);
+      changed();
+    } else if (drag.kind === 'anchor') {
+      const target = snap(drag.origin + (t - T(drag.x0)), { kind: 'anchor', i: drag.i });
+      path = retimeAnchor(drag.base.path, drag.i, target - drag.origin, e.shiftKey);
+      changed();
+    } else if (drag.kind === 'path') {
+      // Anywhere in a line's hold, or right away.
+      drag.target = TrackModel.pathSlot(stops, t - drag.grab, (SNAP_PX / W()) * view.span);
+      draw();
+    } else if (drag.kind === 'span') {
+      const sp = spans[drag.i];
+      if (drag.mode === 'create') {
+        const s = snap(t, null, false);
+        sp.start = Math.min(drag.anchor, s);
+        sp.end = Math.max(drag.anchor, s);
+      } else if (drag.mode === 'start') sp.start = Math.min(snap(t, null, false), sp.end);
+      else if (drag.mode === 'end') sp.end = Math.max(snap(t, null, false), sp.start);
+      else {
+        const len = drag.origin.end - drag.origin.start;
+        const start = Math.max(0, Math.min(L.total - len, snap(drag.origin.start + (t - drag.anchor), null, false)));
+        sp.start = start;
+        sp.end = start + len;
+      }
+      draw();
+    }
+  });
+
+  addEventListener('mouseup', () => {
+    curveDrag = null;
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (!d.moved) {
+      // A click on empty Cursor track adds nothing.
+      if (d.kind === 'span' && d.mode === 'create') {
+        spans.splice(d.i, 1);
+        sel = null;
+        render();
+      }
+      return;
+    }
+    if (d.kind === 'key' || d.kind === 'block') {
+      pushSnapshot(d.base.snap);
+      changed({ track: true });
+    } else if (d.kind === 'anchor') {
+      pushSnapshot(d.base.snap);
+      changed({ path: true });
+    } else if (d.kind === 'path') {
+      const cue = d.target ? d.target.cue : null;
+      const now = TrackModel.cueOf(stops, path);
+      const delay = cue == null ? 0 : d.target.delay;
+      if (d.target && (cue !== now || delay !== TrackModel.cueDelay(stops, path))) {
+        pushSnapshot(d.base.snap);
+        if (cue == null) delete path.startAfter;
+        else path.startAfter = cue;
+        if (delay) path.startDelay = delay;
+        else delete path.startDelay;
+        changed({ path: true });
+      } else draw();
+    } else if (d.kind === 'span') {
+      const sp = spans[d.i];
+      if (d.mode === 'create' && (!sp || X(sp.end) - X(sp.start) < 4)) {
+        spans.splice(d.i, 1);
+        sel = null;
+        return render();
+      }
+      pushSnapshot(d.base.snap);
+      normalizeSpans();
+      sel = null;
+      changed({ track: true });
+    }
+  });
+
+  // ⌘-scroll or pinch zooms around the pointer; scrolling sideways pans.
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const { x } = pos(e);
+    if (e.ctrlKey || e.metaKey) {
+      const at = T(x);
+      view.span = Math.max(200, Math.min(600000, view.span * Math.exp(e.deltaY * 0.01)));
+      view.t0 = at - (x / W()) * view.span;
+    } else {
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      view.t0 += (d / W()) * view.span;
+    }
+    view.auto = false;
+    draw();
+  }, { passive: false });
+
+  // ---- Buttons and messages -------------------------------------------------
+  $('preview').addEventListener('click', () => {
+    $('preview').blur();
+    togglePreview();
+  });
+  $('play').addEventListener('click', () => {
+    $('play').blur();
+    stopPreview();
+    if (progress.playing) narc.stop();
+    else narc.play();
+  });
+  $('fit').addEventListener('click', () => {
+    $('fit').blur();
+    handleKey('\\');
+  });
+  $('close').addEventListener('click', () => narc.close());
+  $('grip').addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const y0 = e.screenY, h0 = window.outerHeight;
+    document.body.classList.add('resizing');
+    const move = (ev) => narc.resize(h0 + ev.screenY - y0);
+    const up = () => {
+      removeEventListener('mousemove', move);
+      removeEventListener('mouseup', up);
+      document.body.classList.remove('resizing');
+    };
+    addEventListener('mousemove', move);
+    addEventListener('mouseup', up);
+  });
+
+  narc.onProgress((p) => {
+    if (p.playing) {
+      stopPreview();
+      progress = p;
+      head = Math.min(p.elapsed, L.total);
+    } else progress = { playing: false };
+    draw();
+    renderHeader();
+  });
+  narc.onPreview(() => startPreview());
+
+  // Edits from the animation panel or the path editor join this history.
+  narc.onTrack((data) => {
+    if (data.key !== key) return;
+    pushSnapshot(snapshot());
+    stops = data.stops || [];
+    spans = data.cursor || [];
+    relayout();
+    if (sel && !selectionExists()) sel = null;
+    inspector.dataset.sel = '';
+    render();
+  });
+  narc.onPath((data) => {
+    if (data.key !== key || JSON.stringify(data.path || null) === JSON.stringify(path)) return;
+    pushSnapshot(snapshot());
+    path = data.path || null;
+    relayout();
+    if (sel && !selectionExists()) sel = null;
+    inspector.dataset.sel = '';
+    render();
+  });
+  // From the path view on the page, while the playhead is in the path.
+  narc.onDockSeek((t) => {
+    if (!L.path) return;
+    stopPreview();
+    head = Math.min(L.total, L.path.body + t);
+    parked = true;
+    draw();
+    renderHeader();
+  });
+  narc.onDockSelect((i) => {
+    sel = i == null ? (sel && sel.kind === 'anchor' ? null : sel) : { kind: 'anchor', i };
+    render();
+  });
+  narc.onDockKey((k, shift) => {
+    if (k === 'undo') undo();
+    else if (k === 'redo') redo();
+    else handleKey(k, shift);
+  });
+
+  async function load() {
+    const data = await narc.load();
+    stopPreview();
+    key = data.key;
+    stops = data.stops || [];
+    spans = data.cursor || [];
+    path = data.path || null;
+    sel = null;
+    head = 0;
+    parked = false;
+    history.undo.length = 0;
+    history.redo.length = 0;
+    view.auto = true;
+    relayout();
+    render();
+  }
+
+  let reloadTimer;
+  narc.onPageChanged(() => {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(load, 400);
+  });
+  // The tracks share whatever height the window has (drag its edge to grow
+  // them), Scroll the most, as it has the curve.
+  function fitRows() {
+    const free = Math.max(120, $('area').clientHeight - ROWS.ruler.h - 6 * 3 - 4);
+    const weights = { scroll: 72, path: 34, cursor: 26 };
+    const sum = 72 + 34 + 26;
+    let y = ROWS.ruler.y + ROWS.ruler.h + 6;
+    for (const name of ['scroll', 'path', 'cursor']) {
+      const r = ROWS[name];
+      r.y = y;
+      r.h = Math.round((free * weights[name]) / sum);
+      r.el.style.top = `${r.y}px`;
+      r.el.style.height = `${r.h}px`;
+      y += r.h + 6;
+    }
+  }
+  new ResizeObserver(() => {
+    fitRows();
+    draw();
+    if (sel && sel.kind === 'line') drawCurve();
+  }).observe($('area'));
+
+  load();
+</script>
+</body>
+</html>

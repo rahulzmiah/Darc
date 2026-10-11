@@ -274,10 +274,11 @@
   }
   new ResizeObserver(draw).observe($('timeline'));
 
-  function mark(type, label) {
+  // `track`: the lines and path an animation played, so the editor can show them.
+  function mark(type, label, track) {
     if (!session) return;
     const t = session.elapsed();
-    if (type === 'anim-start') spans.push({ start: t, end: null });
+    if (type === 'anim-start') spans.push({ start: t, end: null, ...(track && { track }) });
     else if (type === 'anim-end') {
       const open = spans.find((s) => s.end == null);
       if (open) open.end = t;
@@ -814,7 +815,7 @@
       animPlaying = ev.type === 'anim-start';
       $('anim').textContent = animPlaying ? '■ Animation' : '▶ Animation';
     }
-    mark(ev.type, ev.label);
+    mark(ev.type, ev.label, ev.track);
   });
   narc.onToggle(toggle);
   narc.onVelocity((v) => session && session.setVelocity(v));

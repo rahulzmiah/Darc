@@ -13,4 +13,11 @@ contextBridge.exposeInMainWorld('narc', {
   reveal: () => ipcRenderer.send('edit:reveal'),
   close: () => ipcRenderer.send('edit:close'),
   onBusy: (cb) => ipcRenderer.on('edit:busy', () => cb()),
+  animSet: (key, stops) => ipcRenderer.send('edit:anim-set', key, stops),
+  pathSet: (key, path) => ipcRenderer.send('edit:path-set', key, path),
+  pathDelete: (key) => ipcRenderer.send('edit:path-delete', key),
+  rerecord: (plan) => ipcRenderer.send('edit:rerecord', plan),
+  onTrack: (cb) => ipcRenderer.on('anim:track', (_e, data) => cb(data)),
+  onPath: (cb) => ipcRenderer.on('anim:path', (_e, data) => cb(data)),
+  menu: (items) => ipcRenderer.invoke('ctx:menu', items),
 });

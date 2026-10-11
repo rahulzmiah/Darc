@@ -35,6 +35,8 @@
   .btn.record { color: #ff4d2e; border-color: #ff4d2e; }
   .btn.record:hover { background: rgba(255, 77, 46, 0.12); color: #ff6a50; }
   .btn.record.on { background: #ff4d2e; color: #fff; }
+  .seg.path { background: rgba(245, 185, 66, 0.3); border-left: 1px solid #f5b942; color: #ffe2a8; font-size: 10px; font-weight: 600; line-height: 20px; padding-left: 4px; overflow: hidden; cursor: default; }
+  .seg.lead { background: rgba(245, 185, 66, 0.12); cursor: default; }
   #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
   #close:hover { color: #fff; }
   html { border: 1px solid #2a2a2a; }
@@ -78,7 +80,7 @@
     display: grid; grid-template-columns: 48px 1fr; row-gap: 4px; align-items: center;
   }
   #timeline .lbl { color: #666; font-size: 11px; }
-  #tl-ruler { position: relative; height: 14px; }
+  #tl-ruler { position: relative; height: 14px; cursor: ew-resize; }
   #tl-ruler span { position: absolute; top: 0; transform: translateX(-50%); color: #555; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   #tl-ruler span::after { content: ""; position: absolute; left: 50%; bottom: -4px; width: 1px; height: 4px; background: #333; }
   .tl-track { position: relative; height: 20px; background: #111; overflow: hidden; }
@@ -88,6 +90,11 @@
   .seg.move.selected { background: rgba(255, 255, 255, 0.3); border-left-color: #fff; color: #fff; }
   .seg.hold.selected { background: #2a2a2a; }
   #tl-cursor { cursor: crosshair; }
+  #tl-curve { height: 40px; cursor: ew-resize; }
+  #tl-curve svg { position: absolute; inset: 0; display: block; }
+  #tl-curve path { fill: none; stroke: #4da3ff; stroke-width: 1.5; }
+  #tl-curve path.selected { stroke: #fff; }
+  body.scrubbing, body.scrubbing * { cursor: ew-resize !important; }
   .span { position: absolute; top: 2px; bottom: 2px; background: rgba(255, 77, 46, 0.35); border: 1px solid #ff4d2e; cursor: grab; }
   .span.selected { background: rgba(255, 77, 46, 0.65); }
   .span::before, .span::after { content: ""; position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
@@ -188,6 +195,7 @@
   <button class="btn" id="clear" title="Remove every line">Clear</button>
   <button class="btn" id="refresh" title="Recapture the page">Refresh</button>
   <button class="btn record" id="record" title="Record the page (⌘E)">● Rec</button>
+  <button class="btn" id="timeline-btn" title="Open the timeline under the page (⌘T) · P opens it and previews">Timeline</button>
   <button class="btn primary" id="play">▶ Play</button>
   <button id="close" title="Close (⌘.)">×</button>
 </header>
@@ -203,9 +211,11 @@
   <aside>
     <div id="timeline">
       <span class="lbl"></span>
-      <div id="tl-ruler"></div>
+      <div id="tl-ruler" title="Drag to scrub"></div>
       <span class="lbl">Lines</span>
       <div class="tl-track" id="tl-stops"></div>
+      <span class="lbl" title="Where the page is scrolled to over time">Scroll</span>
+      <div class="tl-track" id="tl-curve" title="Drag to scrub"></div>
       <span class="lbl" title="When the recorded pointer is shown during playback">Cursor</span>
       <div class="tl-track" id="tl-cursor" title="Drag to add a span the cursor shows for"></div>
       <div id="tl-playhead"></div>
@@ -229,6 +239,7 @@
               <input class="num" data-bez="3" type="number" step="0.01">
             </div>
           </div>
+          <div class="field"><label></label><button class="btn" id="easing-all" style="grid-column:2/-1;justify-self:start" title="Give every line this line's easing">Use on all lines</button></div>
         </div>
       </section>
       <section data-section="cursor">
@@ -272,12 +283,14 @@
         </div>
       </section>
     </div>
-    <div class="hint">Click the preview or scroll the page and press ⌘K to add a line · drag lines to move · drag ⋮⋮ to reorder · drag on the Cursor track for a span · ⌫ delete · ⌘Z undo · space play · esc stop</div>
+    <div class="hint">Click the preview or scroll the page and press ⌘K to add a line · drag lines to move · drag ⋮⋮ to reorder · drag on the Cursor track for a span · drag the ruler or Scroll curve to scrub · P timeline and preview · ⌫ delete · ⌘Z undo · space play · esc stop</div>
   </aside>
 </main>
 
 <script src="cursor-shapes.js"></script>
 <script src="cursor-layer.js"></script>
+<script src="cursor-path.js"></script>
+<script src="track-model.js"></script>
 <script>
   const EASINGS = [
     ['Linear', [0, 0, 1, 1]],
@@ -323,17 +336,18 @@
   let selSpan = -1;
   let pageInfo = null; // { width, height, viewport }
   let progress = { playing: false };
+  let head = null; // playhead time (ms) while scrubbed, when the page isn't playing
+  let path = null; // the page's cursor path, which plays on the same clock
 
   const maxY = () => (pageInfo ? Math.max(0, pageInfo.height - pageInfo.viewport) : 0);
   const scale = () => (pageInfo ? preview.clientWidth / pageInfo.width : 1);
   const clampY = (y) => Math.round(Math.max(0, pageInfo ? Math.min(maxY(), y) : y));
   const sameCurve = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
 
-  // One easing curve is shared by every line in the track.
-  let easing = [...DEFAULT_EASING];
-
+  // Each line has its own easing; a new line takes the last one's.
   function newStop(y) {
-    return { y, duration: 1600, easing: [...easing], hold: 600 };
+    const last = stops[stops.length - 1];
+    return { y, duration: 1600, easing: [...(last ? last.easing : DEFAULT_EASING)], hold: 600 };
   }
 
   // Undo history: a snapshot of the track is taken before each change. Rapid
@@ -345,7 +359,6 @@
     stops: stops.map((s) => ({ ...s, easing: [...s.easing] })),
     spans: spans.map((s) => ({ ...s })),
     selected,
-    easing: [...easing],
   });
 
   function pushSnapshot(snap) {
@@ -370,7 +383,6 @@
     spans = (snap.spans || []).map((s) => ({ ...s }));
     selected = Math.max(0, Math.min(snap.selected, stops.length - 1));
     selSpan = -1;
-    easing = [...snap.easing];
     lastEdit = { tag: null, time: 0 };
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     renderEasing();
@@ -398,36 +410,63 @@
   easingPreset.innerHTML = EASINGS.map(([name], j) => `<option value="${j}">${name}</option>`).join('')
     + '<option value="custom">Custom</option>';
 
+  // The Easing section shows and edits the selected line's curve.
+  const curEasing = () => (stops[selected] ? stops[selected].easing : DEFAULT_EASING);
+
   function renderEasing() {
+    const easing = curEasing();
     easingPanel.querySelector('svg').outerHTML = curveSvg(easing);
     const preset = EASINGS.findIndex(([, e]) => sameCurve(e, easing));
     easingPreset.value = preset < 0 ? 'custom' : preset;
-    $('easing-sub').textContent = preset < 0 ? 'Custom' : EASINGS[preset][0];
+    const mixed = stops.some((s) => !sameCurve(s.easing, easing));
+    $('easing-sub').textContent = `${stops[selected] ? `Line ${selected + 1} · ` : ''}${preset < 0 ? 'Custom' : EASINGS[preset][0]}${mixed ? ' · mixed' : ''}`;
     easingPanel.querySelectorAll('[data-bez]').forEach((inp, j) => {
       if (inp !== document.activeElement) inp.value = easing[j];
     });
-  }
-
-  function applyEasing() {
-    for (const s of stops) s.easing = [...easing];
-    renderEasing();
-    if (key) commit();
+    $('easing-all').disabled = !mixed;
   }
 
   easingPanel.addEventListener('input', (e) => {
+    const s = stops[selected];
+    if (!s) return;
     if (e.target === easingPreset) {
       if (easingPreset.value === 'custom') return;
-      record('easing-preset');
-      easing = [...EASINGS[+easingPreset.value][1]];
       easingPreset.blur(); // keep keyboard shortcuts working
+      return setEasing(EASINGS[+easingPreset.value][1]);
     } else if (e.target.dataset.bez !== undefined) {
       const v = parseFloat(e.target.value);
       if (Number.isNaN(v)) return;
       const j = +e.target.dataset.bez;
-      record(`easing:${j}`);
-      easing[j] = j % 2 ? v : Math.max(0, Math.min(1, v));
-    }
-    applyEasing();
+      record(`easing:${selected}:${j}`);
+      s.easing = [...s.easing];
+      s.easing[j] = j % 2 ? v : Math.max(0, Math.min(1, v));
+    } else return;
+    renderEasing();
+    commit();
+  });
+
+  // The selected line's easing.
+  function setEasing(easing) {
+    if (!stops[selected]) return;
+    record(`easing-preset:${selected}`);
+    stops[selected].easing = [...easing];
+    renderEasing();
+    commit();
+  }
+
+  // Every line gets the selected one's easing.
+  function easeAll() {
+    if (!stops[selected]) return;
+    record();
+    const easing = stops[selected].easing;
+    for (const s of stops) s.easing = [...easing];
+    renderEasing();
+    commit();
+  }
+
+  $('easing-all').addEventListener('click', () => {
+    $('easing-all').blur();
+    easeAll();
   });
 
   let saveTimer;
@@ -435,11 +474,21 @@
     normalizeSpans();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => narc.save(key, stops, spans), 150);
+    renderCurve();
+    refreshHead();
     renderMeta();
   }
 
+  // The track and the path laid out on one clock (track-model.js).
+  let layoutMemo = { sig: null, path: null, L: null };
+  function layoutNow() {
+    const sig = JSON.stringify(stops);
+    if (layoutMemo.sig !== sig || layoutMemo.path !== path) layoutMemo = { sig, path, L: TrackModel.layout(stops, path) };
+    return layoutMemo.L;
+  }
+
   function totalMs() {
-    return stops.reduce((t, s) => t + s.duration + s.hold, 0);
+    return layoutNow().total;
   }
 
   const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
@@ -449,7 +498,9 @@
     const count = `${stops.length} line${stops.length === 1 ? '' : 's'}`;
     $('meta').textContent = progress.playing
       ? `${secs(progress.elapsed)} / ${secs(progress.total)}`
-      : `${count} · ${secs(totalMs())}`;
+      : head != null
+        ? `${secs(head)} / ${secs(totalMs())}`
+        : `${count} · ${secs(totalMs())}`;
     $('lines-sub').textContent = stops.length ? `${count} · ${secs(totalMs())}` : 'None yet';
     $('play').textContent = progress.playing ? '■ Stop' : '▶ Play';
     $('clear').disabled = !stops.length && !spans.length;
@@ -457,21 +508,25 @@
   }
 
   function renderMarks() {
+    // Without a capture there's nothing to place the lines against.
+    if (!pageInfo) return (marks.innerHTML = '');
     const k = scale();
+    const at = (y) => Math.min(y, maxY()) * k;
     let html = '';
     const s = stops[selected];
-    if (s && pageInfo && !progress.playing) {
+    if (s && !progress.playing) {
       // Grey band for the sticky navbar that will cover the top of the viewport.
       const nav = pageInfo.navbar
         ? `<div class="navbar" style="height:${pageInfo.navbar * k}px">${pageInfo.navbar * k >= 11 ? `Navbar ${pageInfo.navbar}px` : ''}</div>`
         : '';
-      html += `<div class="frame selected" style="top:${s.y * k}px;height:${pageInfo.viewport * k}px">${nav}</div>`;
+      html += `<div class="frame selected" style="top:${at(s.y)}px;height:${pageInfo.viewport * k}px">${nav}</div>`;
     }
-    if (progress.playing && pageInfo) {
-      html += `<div class="frame playhead" style="top:${progress.y * k}px;height:${pageInfo.viewport * k}px"></div>`;
+    const headY = progress.playing ? progress.y : head != null ? yAt(head) : null;
+    if (headY != null) {
+      html += `<div class="frame playhead" style="top:${headY * k}px;height:${pageInfo.viewport * k}px"></div>`;
     }
     stops.forEach((stop, i) => {
-      html += `<div class="line${i === selected ? ' selected' : ''}" data-index="${i}" style="top:${stop.y * k}px"><span>${i + 1}</span></div>`;
+      html += `<div class="line${i === selected ? ' selected' : ''}" data-index="${i}" style="top:${at(stop.y)}px"${stop.y > maxY() ? ` title="${stop.y}px, past the end of this capture"` : ''}><span>${i + 1}</span></div>`;
     });
     marks.innerHTML = html;
   }
@@ -523,6 +578,7 @@
     renderMarks();
     renderList();
     renderTimeline();
+    renderEasing();
   }
 
   function select(i, scrollIntoView) {
@@ -531,6 +587,7 @@
     for (const el of list.querySelectorAll('.stop')) el.classList.toggle('selected', +el.dataset.index === i);
     renderMarks();
     renderTimeline();
+    renderEasing();
     if (scrollIntoView) {
       const card = list.querySelector(`.stop[data-index="${i}"]`);
       if (card) card.scrollIntoView({ block: 'nearest' });
@@ -592,7 +649,21 @@
   function seek() {
     const s = stops[selected];
     if (!s || progress.playing) return;
+    head = null;
     narc.seek(s.y);
+    renderMarks();
+    renderPlayhead();
+    renderMeta();
+  }
+
+  // `before`: the snapshot to undo to, when it was taken as a drag began.
+  function moveStop(from, to, before = snapshot()) {
+    pushSnapshot(before);
+    const [moved] = stops.splice(from, 1);
+    stops.splice(to, 0, moved);
+    selected = to;
+    commit();
+    render();
   }
 
   function removeStop(i) {
@@ -670,14 +741,8 @@
     reorder = null;
     document.body.classList.remove('reordering');
     const target = to > from ? to - 1 : to;
-    if (target !== from) {
-      pushSnapshot(before);
-      const [moved] = stops.splice(from, 1);
-      stops.splice(target, 0, moved);
-      selected = target;
-      commit();
-    }
-    render();
+    if (target !== from) moveStop(from, target, before);
+    else render();
   });
 
   window.addEventListener('mousemove', (e) => {
@@ -686,6 +751,7 @@
     const input = list.querySelector(`.stop[data-index="${drag.i}"] [data-field="y"]`);
     if (input) input.value = stops[drag.i].y;
     renderMarks();
+    renderCurve();
   });
 
   window.addEventListener('mouseup', () => {
@@ -705,21 +771,19 @@
   const tlStops = $('tl-stops');
   const tlCursor = $('tl-cursor');
   const tlPlayhead = $('tl-playhead');
+  const tlCurve = $('tl-curve');
   const TICKS = [250, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000];
   const fmtT = (ms) => (ms >= 60000
     ? `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
     : `${+(ms / 1000).toFixed(2)}s`);
 
-  function segments() {
-    const segs = [];
-    let t = 0;
-    stops.forEach((s, i) => {
-      segs.push({ i, kind: 'move', start: t, end: t + s.duration });
-      t += s.duration;
-      segs.push({ i, kind: 'hold', start: t, end: t + s.hold });
-      t += s.hold;
-    });
-    return segs;
+  // Each line's move and hold, and the cursor path where it plays.
+  const segments = () => layoutNow().segs;
+
+  // Where the page is scrolled to at time t.
+  function yAt(t) {
+    const y = layoutNow().yAt(t);
+    return Math.max(0, pageInfo ? Math.min(maxY(), y) : y);
   }
 
   const tlX = (t) => (t / totalMs()) * tlCursor.clientWidth;
@@ -737,6 +801,9 @@
     tlRuler.innerHTML = ruler;
     tlStops.innerHTML = segments().map((sg) => {
       const w = Math.max(1, tlX(sg.end) - tlX(sg.start));
+      if (sg.kind === 'path' || sg.kind === 'lead') {
+        return `<div class="seg ${sg.kind}" style="left:${tlX(sg.start)}px;width:${w}px" title="${sg.kind === 'path' ? `Cursor path · ${secs(sg.end - sg.start)}` : 'Gliding to where the path starts'}">${sg.kind === 'path' && w > 30 ? 'Path' : ''}</div>`;
+      }
       const title = sg.kind === 'move' ? `Line ${sg.i + 1} · ${secs(stops[sg.i].duration)}` : `Hold · ${secs(stops[sg.i].hold)}`;
       return `<div class="seg ${sg.kind}${sg.i === selected ? ' selected' : ''}" data-index="${sg.i}" style="left:${tlX(sg.start)}px;width:${w}px" title="${title}">${sg.kind === 'move' && w > 14 ? sg.i + 1 : ''}</div>`;
     }).join('');
@@ -744,14 +811,83 @@
       const w = Math.max(3, tlX(sp.end) - tlX(sp.start));
       return `<div class="span${j === selSpan ? ' selected' : ''}" data-span="${j}" style="left:${tlX(sp.start)}px;width:${w}px" title="Cursor shown ${fmtT(sp.start)} – ${fmtT(sp.end)}"><span class="x" data-remove-span="${j}" title="Remove">×</span></div>`;
     }).join('');
+    renderCurve();
     renderPlayhead();
   }
 
-  function renderPlayhead() {
-    if (!progress.playing || !totalMs()) return (tlPlayhead.style.display = 'none');
-    tlPlayhead.style.display = 'block';
-    tlPlayhead.style.left = `${tlCursor.offsetLeft + tlX(Math.min(progress.elapsed, totalMs()))}px`;
+  // The scroll position over time, down the track as the page scrolls down,
+  // so each move's easing and the holds between them read at a glance.
+  function renderCurve() {
+    if (!totalMs()) return;
+    const w = tlCurve.clientWidth;
+    const h = tlCurve.clientHeight;
+    const L = layoutNow();
+    const samples = [];
+    for (let x = 0; x <= w; x += 2) samples.push([x, L.yAt((x / w) * L.total)]);
+    const ys = [0, ...stops.map((s) => s.y), ...samples.map(([, y]) => y)];
+    const lo = Math.min(...ys);
+    const range = Math.max(1, Math.max(...ys) - lo);
+    const py = (y) => (4 + ((y - lo) / range) * (h - 8)).toFixed(1);
+    const line = (pts) => pts.map(([x, y], j) => `${j ? 'L' : 'M'}${x.toFixed(1)},${py(y)}`).join('');
+    const move = L.segs.find((sg) => sg.kind === 'move' && sg.i === selected);
+    const sel = move ? samples.filter(([x]) => x >= tlX(move.start) - 1 && x <= tlX(move.end) + 1) : [];
+    tlCurve.innerHTML = `<svg width="${w}" height="${h}"><path d="${line(samples)}"/>${sel.length > 1 ? `<path class="selected" d="${line(sel)}"/>` : ''}</svg>`;
   }
+
+  function renderPlayhead() {
+    const t = progress.playing ? progress.elapsed : head;
+    if (t == null || !totalMs()) return (tlPlayhead.style.display = 'none');
+    tlPlayhead.style.display = 'block';
+    tlPlayhead.style.left = `${tlCursor.offsetLeft + tlX(Math.min(t, totalMs()))}px`;
+  }
+
+  // ---- Scrubbing ------------------------------------------------------------
+  // Dragging the ruler or the Scroll curve puts the page at that moment (the
+  // pointer too, inside the cursor path), and it follows edits made while
+  // it's parked there. The timeline (⌘T) previews.
+  function showHead() {
+    if (head == null) return;
+    narc.drive(head);
+    renderMarks();
+    renderPlayhead();
+    renderMeta();
+    scrollPreviewTo(yAt(head));
+  }
+
+  // After an edit: keep the playhead in the animation and the page on it.
+  function refreshHead() {
+    if (head == null || progress.playing) return;
+    if (!totalMs()) {
+      head = null;
+      renderMarks();
+      renderPlayhead();
+      return;
+    }
+    head = Math.min(head, totalMs());
+    showHead();
+  }
+
+  let scrubbing = false;
+  function scrubTo(clientX) {
+    head = tlT(clientX);
+    showHead();
+  }
+  for (const el of [tlRuler, tlCurve]) {
+    el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || !totalMs() || !key) return;
+      e.preventDefault();
+      if (progress.playing) narc.stop();
+      scrubbing = true;
+      document.body.classList.add('scrubbing');
+      scrubTo(e.clientX);
+    });
+  }
+  window.addEventListener('mousemove', (e) => scrubbing && scrubTo(e.clientX));
+  window.addEventListener('mouseup', () => {
+    if (!scrubbing) return;
+    scrubbing = false;
+    document.body.classList.remove('scrubbing');
+  });
 
   // Clamp spans to the animation, drop empty ones and merge any that overlap.
   function normalizeSpans() {
@@ -807,7 +943,7 @@
 
   tlStops.addEventListener('mousedown', (e) => {
     const seg = e.target.closest('.seg');
-    if (!seg || e.button !== 0) return;
+    if (!seg || seg.dataset.index == null || e.button !== 0) return;
     e.preventDefault();
     select(+seg.dataset.index, true);
     scrollPreviewTo(stops[selected].y);
@@ -1099,6 +1235,10 @@
   }
 
   $('play').addEventListener('click', togglePlay);
+  $('timeline-btn').addEventListener('click', () => {
+    $('timeline-btn').blur();
+    narc.timeline(false);
+  });
   $('refresh').addEventListener('click', () => capture(true));
   $('record').addEventListener('click', () => narc.record());
   narc.onRecordState((on) => {
@@ -1165,6 +1305,8 @@
     } else if (e.key === 'Escape') {
       if (selSpan >= 0) selectSpan(-1);
       narc.stop();
+    } else if (e.key.toLowerCase() === 'p' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      narc.timeline(true);
     } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && stops.length) {
       e.preventDefault();
       if (e.altKey || e.shiftKey) {
@@ -1181,10 +1323,73 @@
     }
   });
 
+  // ---- Right-click ----------------------------------------------------------
+  // Lines (on the preview, their cards and the timeline), cursor spans and
+  // library images: select it as a click would, then the same edits as the
+  // buttons and keys.
+  function contextTarget(el) {
+    const span = el.closest('#tl-cursor .span');
+    if (span) return { kind: 'span', i: +span.dataset.span };
+    const line = el.closest('#preview .line, #stops .stop, #tl-stops .seg');
+    if (line && line.dataset.index != null && stops[+line.dataset.index]) return { kind: 'line', i: +line.dataset.index };
+    const tile = el.closest('#cur-library .tile');
+    if (tile) return { kind: 'image', id: tile.dataset.id };
+    return null;
+  }
+
+  function contextItems(h) {
+    if (h.kind === 'span') return [{ id: 'delete', label: 'Delete span', accelerator: 'Backspace' }];
+    if (h.kind === 'image') return [{ id: 'remove', label: 'Remove image' }];
+    const s = stops[h.i];
+    return [
+      { id: 'go', label: `Go to line ${h.i + 1}` },
+      { type: 'separator' },
+      { id: 'up', label: 'Move up', enabled: h.i > 0 },
+      { id: 'down', label: 'Move down', enabled: h.i < stops.length - 1 },
+      { type: 'separator' },
+      { label: 'Ease', submenu: EASINGS.map(([n, ez], j) => ({ id: `ease:${j}`, label: n, checked: sameCurve(ez, s.easing) })) },
+      { id: 'ease-all', label: 'Use this easing on all lines', enabled: stops.length > 1 },
+      { type: 'separator' },
+      { id: 'delete', label: `Delete line ${h.i + 1}`, accelerator: 'Backspace' },
+    ];
+  }
+
+  function contextSelect(h) {
+    if (h.kind === 'span') selectSpan(h.i);
+    else if (h.kind === 'line') select(h.i, true);
+  }
+
+  function contextAction(id, h) {
+    if (h.kind === 'span') {
+      if (id === 'delete' && spans[h.i]) removeSpan(h.i);
+    } else if (h.kind === 'image') {
+      if (id === 'remove') narc.cursorRemove(h.id);
+    } else if (!stops[h.i]) {
+      // Gone while the menu was up.
+    } else if (id === 'go') {
+      scrollPreviewTo(stops[h.i].y);
+      seek();
+    } else if (id === 'up' && h.i > 0) moveStop(h.i, h.i - 1);
+    else if (id === 'down' && h.i < stops.length - 1) moveStop(h.i, h.i + 1);
+    else if (id && id.startsWith('ease:')) setEasing(EASINGS[+id.slice(5)][1]);
+    else if (id === 'ease-all') easeAll();
+    else if (id === 'delete') removeStop(h.i);
+  }
+
+  window.addEventListener('contextmenu', async (e) => {
+    if (e.target.matches('input, textarea')) return; // the usual editing menu
+    e.preventDefault();
+    const h = contextTarget(e.target);
+    if (!h || drag || spanDrag || reorder) return;
+    contextSelect(h);
+    contextAction(await narc.menu(contextItems(h)), h);
+  });
+
   narc.onProgress((p) => {
     const wasPlaying = progress.playing;
     const lastIndex = progress.index;
     progress = p.playing ? p : { playing: false };
+    if (p.playing) head = null;
     renderMeta();
     renderMarks();
     renderPlayhead();
@@ -1213,7 +1418,8 @@
       pageInfo = info;
       shot.innerHTML = info.tiles.map((t) => `<img src="${t.src}" style="aspect-ratio:${info.width}/${t.height}">`).join('');
       $('empty').style.display = 'none';
-      for (const s of stops) s.y = clampY(s.y);
+      // Lines past the end of a capture (a page still loading, lazy content)
+      // are drawn at the bottom but keep their positions.
       render();
     } catch (err) {
       if (id !== captureId) return;
@@ -1223,18 +1429,26 @@
 
   async function load() {
     const data = await narc.load();
+    // The same page again (a reload): keep its capture, history and selection.
+    if (data.key && data.key === key && pageInfo) {
+      stops = data.stops || [];
+      spans = data.cursor || [];
+      path = data.path || null;
+      selected = Math.max(0, Math.min(selected, stops.length - 1));
+      render();
+      return;
+    }
     key = data.key;
     stops = data.stops || [];
     spans = data.cursor || [];
     selected = 0;
     selSpan = -1;
+    path = data.path || null;
+    head = null;
     history.undo.length = 0;
     history.redo.length = 0;
     lastEdit = { tag: null, time: 0 };
-    // Older tracks could mix curves; bring every line in line with the first.
-    easing = stops.length ? [...stops[0].easing] : [...DEFAULT_EASING];
-    if (stops.some((s) => !sameCurve(s.easing, easing))) applyEasing();
-    else renderEasing();
+    renderEasing();
     pageInfo = null;
     shot.innerHTML = '';
     render();
@@ -1243,6 +1457,28 @@
       $('empty').style.display = 'flex';
       $('empty').textContent = 'Open a page in the main window (⌘L), then come back.';
     }
+  }
+
+  // Edits from the timeline (⌘T) or the path editor.
+  narc.onTrack((data) => {
+    if (data.key !== key) return;
+    pushSnapshot(snapshot());
+    stops = data.stops || [];
+    spans = data.cursor || [];
+    selected = Math.max(0, Math.min(selected, stops.length - 1));
+    selSpan = -1;
+    render();
+    refreshPlayheadOnly();
+  });
+  narc.onPath((data) => {
+    if (data.key !== key) return;
+    path = data.path || null;
+    render();
+  });
+  function refreshPlayheadOnly() {
+    if (head != null) head = Math.min(head, totalMs());
+    renderMarks();
+    renderPlayhead();
   }
 
   let reloadTimer;

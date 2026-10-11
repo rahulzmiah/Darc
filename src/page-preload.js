@@ -270,8 +270,8 @@ function stopPlayback() {
 }
 
 // `cue`: the line a cursor path starts at. Playback waits there, as the move
-// to it ends, until the path has played (anim:resume).
-function play(stops, cue) {
+// to it ends (or `delay` ms into its hold), until the path has played (anim:resume).
+function play(stops, cue, delay) {
   stopPlayback();
   const el = root();
   animations.delete(el);
@@ -285,8 +285,10 @@ function play(stops, cue) {
     segments.push({ start: t, end: t + Math.max(0, stop.hold), from: stop.y, to: stop.y, ease: (p) => p, index: i });
     t += Math.max(0, stop.hold);
   });
-  const cueAt = cue != null && segments[cue * 2] ? segments[cue * 2].end : null;
-  playback = { segments, total: t, start: performance.now(), raf: 0, cueAt, paused: null, tick: null, path: location.pathname };
+  const cueAt = cue != null && segments[cue * 2] ? segments[cue * 2].end + Math.max(0, Math.min(delay || 0, segments[cue * 2 + 1].end - segments[cue * 2 + 1].start)) : null;
+  // offset: time the cursor path took, so elapsed stays on the same clock as
+  // the timeline (and the cursor spans timed against it).
+  playback = { segments, total: t, start: performance.now(), raf: 0, cueAt, paused: null, tick: null, path: location.pathname, offset: 0 };
   const tick = (now) => {
     // A single-page app (Barba, Swup…) changed page without loading one: the
     // timeline belongs to the old page, and the new one resets its own scroll.
@@ -298,7 +300,7 @@ function play(stops, cue) {
     const p = seg.end > seg.start ? Math.min(1, Math.max(0, (elapsed - seg.start) / (seg.end - seg.start))) : 1;
     const y = Math.max(0, Math.min(maxScroll(el).y, seg.from + (seg.to - seg.from) * seg.ease(p)));
     el.scrollTo({ top: y, behavior: 'instant' });
-    ipcRenderer.send('anim:progress', { playing: true, y, elapsed: Math.min(elapsed, t), total: t, index: seg.index });
+    ipcRenderer.send('anim:progress', { playing: true, y, elapsed: Math.min(elapsed, t) + playback.offset, total: t + playback.offset, index: seg.index });
     // A click marker clicks as its move ends, before the hold.
     for (const s of segments) {
       if (s.click && !s.clicked && elapsed >= s.end) {
@@ -309,7 +311,7 @@ function play(stops, cue) {
     if (cued) {
       playback.cueAt = null;
       playback.paused = elapsed;
-      ipcRenderer.send('anim:cue');
+      ipcRenderer.send('anim:cue', { elapsed: elapsed + playback.offset, index: seg.index });
     } else if (elapsed >= t) stopPlayback();
     else playback.raf = requestAnimationFrame(tick);
   };
@@ -317,9 +319,10 @@ function play(stops, cue) {
   tick(playback.start);
 }
 
-// The cursor path has played: carry on from wherever it left the page, so the
-// rest of the line's hold and the next move start there instead of jumping back.
-function resumePlayback() {
+// The cursor path has played (for `took` ms): carry on from wherever it left
+// the page, so the rest of the line's hold and the next move start there
+// instead of jumping back.
+function resumePlayback(took) {
   if (!playback || playback.paused == null) return;
   if (location.pathname !== playback.path) return stopPlayback();
   const el = root();
@@ -335,12 +338,13 @@ function resumePlayback() {
     break;
   }
   playback.paused = null;
+  playback.offset += Math.max(0, took || 0);
   playback.start = performance.now() - elapsed;
   playback.raf = requestAnimationFrame(playback.tick);
 }
 
-ipcRenderer.on('anim:play', (_e, stops, cue) => play(stops, cue));
-ipcRenderer.on('anim:resume', resumePlayback);
+ipcRenderer.on('anim:play', (_e, stops, cue, delay) => play(stops, cue, delay));
+ipcRenderer.on('anim:resume', (_e, took) => resumePlayback(took));
 ipcRenderer.on('anim:stop', stopPlayback);
 // Selecting a marker in the animation panel glides the page to it.
 ipcRenderer.on('anim:seek', (_e, y) => {
@@ -360,6 +364,13 @@ ipcRenderer.on('path:scroll', (_e, y) => {
   const el = root();
   animations.delete(el);
   el.scrollTo({ top: y, behavior: 'instant' });
+});
+// So do the animation panel's preview and playhead.
+ipcRenderer.on('anim:scrub', (_e, y) => {
+  stopPlayback();
+  const el = root();
+  animations.delete(el);
+  el.scrollTo({ top: Math.max(0, Math.min(maxScroll(el).y, y)), behavior: 'instant' });
 });
 ipcRenderer.on('anim:get-scroll', () => {
   const el = root();

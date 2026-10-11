@@ -74,7 +74,19 @@
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; background: #fff; border: 0; }
   input[type=range]:focus { outline: none; }
 
-  footer { flex: none; border-top: 1px solid #1f1f1f; }
+  footer { flex: none; border-top: 1px solid #1f1f1f; position: relative; }
+  /* Cuts: a seam where a stretch was taken out, and the stretch being picked. */
+  #tl-video .seam { position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1px; background: #ff4d2e; cursor: pointer; z-index: 3; }
+  #tl-video .seam::after { content: "✂"; position: absolute; top: -12px; left: -4px; color: #ff4d2e; font-size: 10px; line-height: 1; }
+  #tl-video .seam.sel { background: #fff; box-shadow: 0 0 0 2px #ff4d2e; }
+  #tl-video .cutsel { position: absolute; top: 0; bottom: 0; background: rgba(255, 77, 46, 0.28); border-left: 1px solid #ff4d2e; border-right: 1px solid #ff4d2e; pointer-events: none; }
+  #cut-btn { display: none; }
+  body.has-cutsel #cut-btn { display: block; }
+  #grip { position: absolute; left: 0; right: 0; top: -5px; height: 10px; cursor: ns-resize; z-index: 5; display: flex; align-items: center; justify-content: center; }
+  #grip::after { content: ""; width: 44px; height: 4px; background: #3a3a3a; }
+  #grip:hover::after, body.resizing #grip::after { background: #4da3ff; }
+  body.resizing, body.resizing * { cursor: ns-resize !important; }
+  body.path-editing #frame #pathedit { pointer-events: auto; }
   .transport { height: 36px; padding: 0 16px; display: flex; align-items: center; gap: 12px; }
   #play { width: 28px; height: 24px; border: 1px solid #333; color: #ddd; font-size: 11px; }
   #play:hover { border-color: #555; color: #fff; }
@@ -86,7 +98,7 @@
      cursor shows for. */
   #timeline {
     position: relative; padding: 4px 16px 14px;
-    display: grid; grid-template-columns: 52px 1fr; row-gap: 4px; align-items: center;
+    display: grid; grid-template-columns: 66px 1fr; row-gap: 4px; align-items: center;
   }
   #timeline .lbl { color: #666; font-size: 11px; }
   #tl-ruler { position: relative; height: 16px; cursor: text; }
@@ -103,6 +115,54 @@
   #tl-video .mark.reload { background: rgba(255, 77, 46, 0.7); }
   #tl-video .anim { position: absolute; bottom: 0; height: 4px; background: rgba(77, 163, 255, 0.55); pointer-events: none; }
   #tl-cursor { cursor: crosshair; overflow: hidden; }
+  /* What the animations played, laid out on the footage: each line's move and
+     hold on Scroll, the cursor path with its points and clicks on Path. */
+  body.no-anim .anim-only { display: none; }
+  /* --tk: how tall the tracks are, set with the grip above the timeline. */
+  #tl-scroll { height: calc(46px * var(--tk, 1.5)); cursor: text; overflow: hidden; }
+  #tl-path { height: calc(40px * var(--tk, 1.5)); cursor: text; overflow: hidden; }
+  #tl-video { height: calc(34px * var(--tk, 1.5)); }
+  #tl-cursor { height: calc(30px * var(--tk, 1.5)); }
+  .aseg { position: absolute; top: 0; bottom: 0; }
+  .aseg.move { background: rgba(77, 163, 255, 0.24); border-left: 1px solid #4da3ff; color: #cfe6ff; font-size: 10px; font-weight: 600; padding: 3px 0 0 4px; overflow: hidden; cursor: grab; }
+  .aseg.hold { background: #1a1a1a; cursor: grab; }
+  .aseg.gap { background: rgba(245, 185, 66, 0.07); }
+  .aseg.sel.move { background: rgba(255, 255, 255, 0.24); border-left-color: #fff; color: #fff; }
+  .aseg.sel.hold { background: #262626; }
+  .pblock { position: absolute; top: 4px; bottom: 4px; background: rgba(245, 185, 66, 0.24); border: 1px solid #f5b942; color: #ffe2a8; font-size: 10px; font-weight: 600; padding: 2px 0 0 4px; overflow: hidden; cursor: grab; }
+  .pblock .lead { position: absolute; left: 0; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, rgba(245, 185, 66, 0.22) 0 3px, transparent 3px 7px); }
+  .pblock.sel { background: rgba(245, 185, 66, 0.42); border-color: #fff; }
+  .key { position: absolute; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; transform: rotate(45deg); background: #4da3ff; border: 1px solid #0b0b0b; cursor: ew-resize; z-index: 2; }
+  .key.depart { background: #0b0b0b; border-color: #4da3ff; width: 8px; height: 8px; margin: -4px 0 0 -4px; }
+  .key.sel { background: #fff; border-color: #0b0b0b; }
+  .key.depart.sel { background: #0b0b0b; border-color: #fff; }
+  .point { position: absolute; top: 50%; width: 8px; height: 8px; margin: -6px 0 0 -4px; background: #fff; border: 1px solid #0b0b0b; cursor: ew-resize; z-index: 2; }
+  .point.first { cursor: pointer; }
+  .point.sel { background: #4da3ff; border-color: #fff; }
+  .point.target { outline: 2px solid #ff4d2e; }
+  .aclick { position: absolute; bottom: 3px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50% !important; background: #ff4d2e; border: 1px solid #0b0b0b; cursor: grab; z-index: 3; }
+  .aclick.static { bottom: auto; top: 3px; cursor: default; }
+  .lbl.edited::after { content: " •"; color: #f5b942; }
+  .banner { margin-top: 10px; padding: 8px 10px; border: 1px solid rgba(245, 185, 66, 0.5); background: rgba(245, 185, 66, 0.08); color: #e8d3a6; font-size: 11px; }
+  .banner .row { margin-top: 8px; }
+  .banner .btn { flex: none; }
+  #anim-body .field { grid-template-columns: 72px 1fr 28px; }
+  #anim-body .unit { color: #555; font-size: 11px; }
+  #anim-body h3 { font-size: 12px; font-weight: 600; color: #ddd; margin-top: 10px; display: flex; gap: 6px; align-items: baseline; }
+  #anim-body h3 span { color: #666; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #anim-body .btn.on { color: #fff; border-color: #ff4d2e; }
+  #rerecord { display: none; }
+  /* Previewing changes: the timeline runs on the changed timing, so the
+     trim and cursor spans (on the recording's own timing) step aside. */
+  #pv-wrap { display: none; align-items: center; gap: 6px; color: #e8d3a6; font-size: 12px; cursor: pointer; }
+  body.anim-edited #pv-wrap { display: flex; }
+  #pv-wrap input { margin: 0; accent-color: #f5b942; }
+  body.previewing #tl-video > *, body.previewing #tl-cursor > * { display: none; }
+  body.previewing #tl-video::after { content: "Previewing the changes · trim and cursor spans apply to the recording as it is"; position: absolute; left: 10px; top: 0; bottom: 0; display: flex; align-items: center; color: #8a7a55; font-size: 11px; }
+  body.previewing #tl-video, body.previewing #tl-cursor { background: repeating-linear-gradient(135deg, #141414 0 6px, #111 6px 12px); }
+  body.previewing #tl-playhead { background: #f5b942; }
+  body.previewing #tl-playhead::before { border-top-color: #f5b942; }
+  body.has-plays #rerecord { display: block; }
   .span { position: absolute; top: 3px; bottom: 3px; background: rgba(255, 77, 46, 0.35); border: 1px solid #ff4d2e; cursor: grab; }
   .span.selected { background: rgba(255, 77, 46, 0.65); }
   .span::before, .span::after { content: ""; position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
@@ -124,6 +184,7 @@
   <h1 id="name">Edit</h1>
   <span class="meta" id="meta"></span>
   <span class="status" id="status"></span>
+  <button class="btn" id="rerecord" title="Record it again with the animation as it is now, playing each animation in the same order">Re-record</button>
   <button class="btn" id="discard" title="Throw the recording away">Discard</button>
   <button class="btn" id="reveal" title="Show the saved video in Finder">Reveal</button>
   <button class="btn primary" id="save" title="Save to Movies/Darc (⌘S)">Save</button>
@@ -131,10 +192,17 @@
 </header>
 <main>
   <div id="stage">
-    <div id="frame"><video id="video" preload="auto" muted playsinline></video><canvas id="overlay"></canvas></div>
+    <div id="frame"><video id="video" preload="auto" muted playsinline></video><canvas id="overlay"></canvas><canvas id="pathedit"></canvas></div>
     <div id="empty">Loading…</div>
   </div>
   <aside>
+    <section class="anim-only">
+      <h2>Animation <span class="sub" id="anim-sub"></span></h2>
+      <div class="banner" id="anim-edited" hidden>Changed since this recording. The video still shows what was recorded; Re-record to film it with the changes.
+        <div class="row"><button class="btn sm" id="anim-rerecord">Re-record</button><button class="btn sm" id="anim-revert" title="Put the animation back as it was recorded">Revert</button></div></div>
+      <div id="anim-body"></div>
+      <p class="note">Scroll and Path changes are what plays from now on (in ⌘. and ⌘T too) and reach the video when you re-record. Trim and the cursor are applied when saving.</p>
+    </section>
     <section>
       <h2>Cursor <span class="sub" id="cursor-sub"></span></h2>
       <div class="cursor-only">
@@ -175,21 +243,31 @@
       <div class="field"><label>Length</label>
         <span class="val" id="trim-len"></span>
         <button class="btn sm" id="trim-reset" title="Keep the whole recording">Reset</button></div>
-      <p class="note">Drag the yellow handles on the Video track, or press I and O to start and end at the playhead.</p>
+      <div class="field"><label>Cuts</label>
+        <span class="val" id="cuts-val"></span>
+        <button class="btn sm" id="cuts-reset" title="Put every cut back">Restore</button></div>
+      <p class="note">Drag the yellow handles on the Video track, or press I and O to start and end at the playhead. Drag across the Video track to pick a stretch (a pause, a page loading) and ⌫ cuts it out; everything after closes up, the animation and cursor with it. Click a red seam and ⌫ to put it back.</p>
     </section>
   </aside>
 </main>
 <footer>
+  <div id="grip" title="Drag to make the timeline taller or shorter"></div>
   <div class="transport">
     <button id="play" title="Play / pause (space)">▶</button>
     <span id="clock"></span>
-    <span class="hint">space play · ← → frame (⇧ second) · I / O trim · ⌫ delete span · ⌘Z undo · ⌘S save</span>
+    <button class="btn sm" id="cut-btn" title="Take the selected stretch out of the video (⌫)">✂ Cut</button>
+    <label id="pv-wrap" title="Play the recording retimed to follow the changes. Rough where it has to stretch the footage: Re-record films it properly"><input type="checkbox" id="pv" checked>Preview changes</label>
+    <span class="hint">space play · ← → frame · I / O trim · drag across Video to pick a stretch, ⌫ cuts it · drag blocks to retime (⇧ pushes later ones) · ⌘/⇧-click for several · ⌫ delete · ⌘Z undo · ⌘S save</span>
   </div>
   <div id="timeline">
     <span class="lbl"></span>
     <div id="tl-ruler"></div>
     <span class="lbl">Video</span>
     <div class="tl-track" id="tl-video"></div>
+    <span class="lbl anim-only" id="lbl-scroll" title="Each line's move and hold, as played">Scroll</span>
+    <div class="tl-track anim-only" id="tl-scroll"></div>
+    <span class="lbl anim-only" id="lbl-path" title="The cursor path, with its points and clicks">Path</span>
+    <div class="tl-track anim-only" id="tl-path"></div>
     <span class="lbl cursor-only" title="When the cursor shows">Cursor</span>
     <div class="tl-track cursor-only" id="tl-cursor" title="Drag to add a span the cursor shows for"></div>
     <div id="tl-playhead"></div>
@@ -199,6 +277,8 @@
 <script src="vendor/mp4-muxer.js"></script>
 <script src="cursor-shapes.js"></script>
 <script src="cursor-layer.js"></script>
+<script src="cursor-path.js"></script>
+<script src="track-model.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
   const video = $('video');
@@ -345,6 +425,15 @@
   // Draws frame i's cursor into ctx, whose transform maps video pixels.
   function drawCursor(ctx, i) {
     if (!sim || edits.cursor.mode === 'off') return;
+    const moved = previewPointer();
+    if (moved) {
+      layer.pos = moved;
+      layer.alpha = 1;
+      layer.shape = sim.shape[i] || { type: 'default' };
+      layer.press = 0;
+      layer.draw(ctx);
+      return;
+    }
     const x = sim.x[i];
     if (!(sim.alpha[i] > 0.005) || Number.isNaN(x)) return;
     layer.pos = { x, y: sim.y[i] };
@@ -368,6 +457,7 @@
     ctx.clearRect(0, 0, w, h);
     ctx.setTransform(w / W, 0, 0, h / H, 0, 0);
     drawCursor(ctx, clamp(current, 0, frames - 1));
+    drawPathEdit();
     // A newly picked custom image draws once it has loaded.
     if (layer && layer.custom && !ready(layer.custom)) layer.custom.decode().then(drawOverlay, () => {});
   }
@@ -447,17 +537,18 @@
   };
   $('set-in').addEventListener('click', () => trimToPlayhead('in'));
   $('set-out').addEventListener('click', () => trimToPlayhead('out'));
-  $('trim-reset').addEventListener('click', () => {
+  function resetTrim() {
     record();
     edits.in = 0;
     edits.out = duration;
     changed();
-  });
+  }
+  $('trim-reset').addEventListener('click', resetTrim);
 
   // ---- Undo ------------------------------------------------------------------
   const history = { undo: [], redo: [] };
   let lastEdit = { tag: null, time: 0 };
-  const snapshot = () => JSON.stringify(edits);
+  const snapshot = () => JSON.stringify({ edits, plans, shifts: plays.map((pl) => pl.shift || 0) });
   // Slider drags and typing coalesce into one step per control.
   function record(tag) {
     const now = Date.now();
@@ -478,9 +569,19 @@
     const [from, to] = redo ? [history.redo, history.undo] : [history.undo, history.redo];
     if (!from.length) return;
     to.push(snapshot());
-    edits = JSON.parse(from.pop());
+    const snap = JSON.parse(from.pop());
+    // A change to the animation goes back to the page's saved track too.
+    const shifts = snap.shifts || plays.map(() => 0);
+    const animChanged = !sameJ(snap.plans, plans) || plays.some((pl, p) => (pl.shift || 0) !== shifts[p]);
+    plays.forEach((pl, p) => (pl.shift = shifts[p]));
+    snap.edits.shifts = shifts;
+    for (const key of Object.keys(snap.plans || {})) if (!sameJ(snap.plans[key], plans[key])) setPlan(key, snap.plans[key], true);
+    changesChanged();
+    renderAnim();
     lastEdit = { tag: null, time: 0 };
     selSpan = -1;
+    if (animChanged && sameJ(snap.edits, edits)) return renderAnimPanel();
+    edits = snap.edits;
     changed();
   }
 
@@ -500,6 +601,9 @@
   // start so rounding never lands on the one before.
   function seekFrame(i) {
     current = clamp(Math.round(i), 0, frames - 1);
+    // Never onto a frame that's been cut out.
+    const c = !previewOn() && cutAt(current / FPS);
+    if (c) current = clamp(Math.round(c.end * FPS), 0, frames - 1);
     video.currentTime = (current + 0.25) / FPS;
     drawOverlay();
     renderPlayhead();
@@ -507,6 +611,7 @@
 
   const playing = () => !video.paused && !video.ended;
   function play() {
+    if (previewOn()) return togglePreviewPlay();
     if (playing()) return pause();
     if (current < inFrame() || current >= outFrame() - 1) seekFrame(inFrame());
     video.play().catch(() => {});
@@ -523,6 +628,12 @@
     const i = Math.round(meta.mediaTime * FPS);
     if (playing()) {
       current = i;
+      // Jumps over cuts.
+      const c = cutAt(current / FPS);
+      if (c) {
+        current = Math.round(c.end * FPS);
+        video.currentTime = (current + 0.25) / FPS;
+      }
       // Playback stops at the end of the trim.
       if (current >= outFrame() - 1) {
         video.pause();
@@ -556,21 +667,110 @@
   let selSpan = -1;
 
   const trackWidth = () => tlVideo.clientWidth;
-  const tlX = (t) => (t / duration) * trackWidth();
+
+  // The timeline runs on the recording's time with its cuts closed up, or
+  // while previewing changes, on the changed timing (see changesMap). tlX
+  // and tlT take and give recording seconds (changed-timing seconds while
+  // previewing); axX places a time on the axis as it's shown.
+  const tlDur = () => (previewOn() ? changesMap().total : duration - cutTotal());
+  const axX = (t) => (t / tlDur()) * trackWidth();
+  const tlX = (t) => axX(previewOn() ? t : toProg(t));
   const tlT = (clientX) => {
     const r = tlVideo.getBoundingClientRect();
-    return clamp(((clientX - r.left) / r.width) * duration, 0, duration);
+    const a = clamp(((clientX - r.left) / r.width) * tlDur(), 0, tlDur());
+    return previewOn() ? a : toSrc(a);
   };
+
+  // ---- Cuts ----------------------------------------------------------------
+  // Stretches taken out of the video ({ start, end } s of the recording):
+  // playing skips them, saving leaves them out, and the timeline closes up
+  // over them, so everything after (animation, cursor, trim) stays with its
+  // footage.
+  const cuts = () => (edits && edits.cuts) || [];
+  const cutTotal = () => cuts().reduce((t, c) => t + c.end - c.start, 0);
+  const cutAt = (s) => cuts().find((c) => s >= c.start && s < c.end);
+  let cutSel = null; // a stretch picked on the Video track, to cut
+  let selCut = -1; // a seam, to put back
+  function toProg(s) {
+    let t = s;
+    for (const c of cuts()) {
+      if (s >= c.end) t -= c.end - c.start;
+      else {
+        if (s > c.start) t -= s - c.start;
+        break;
+      }
+    }
+    return t;
+  }
+  function toSrc(t) {
+    let s = t;
+    for (const c of cuts()) {
+      if (s >= c.start) s += c.end - c.start;
+      else break;
+    }
+    return Math.min(s, duration);
+  }
+  function normalizeCuts() {
+    const sorted = cuts()
+      .map((c) => ({ start: snapFrame(clamp(c.start, 0, duration)), end: snapFrame(clamp(c.end, 0, duration)) }))
+      .filter((c) => c.end - c.start >= 1 / FPS)
+      .sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const c of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && c.start <= last.end) last.end = Math.max(last.end, c.end);
+      else merged.push(c);
+    }
+    edits.cuts = merged;
+  }
+  function cutSelection() {
+    if (!cutSel || previewOn()) return;
+    record();
+    edits.cuts = [...cuts(), cutSel];
+    normalizeCuts();
+    const c = cutSel;
+    cutSel = null;
+    changed();
+    seekFrame(Math.round(c.end * FPS));
+  }
+  function restoreCut(j) {
+    if (!cuts()[j]) return;
+    record();
+    edits.cuts = cuts().filter((_, k) => k !== j);
+    selCut = -1;
+    changed();
+  }
+  function renderCuts() {
+    document.body.classList.toggle('has-cutsel', !!cutSel && !previewOn());
+    $('cut-btn').textContent = cutSel ? `✂ Cut ${(cutSel.end - cutSel.start).toFixed(2)} s` : '✂ Cut';
+    $('cuts-val').textContent = cuts().length ? `${cuts().length} · ${cutTotal().toFixed(2)} s out` : 'None';
+    $('cuts-reset').disabled = !cuts().length;
+  }
+  $('cut-btn').addEventListener('click', () => {
+    $('cut-btn').blur();
+    cutSelection();
+  });
+  $('cuts-reset').addEventListener('click', () => {
+    $('cuts-reset').blur();
+    record();
+    edits.cuts = [];
+    selCut = -1;
+    changed();
+  });
+  // Stepping a frame moves on the cut-up timeline.
+  function stepFrames(n) {
+    seekFrame(Math.round(toSrc(clamp(toProg(current / FPS) + n / FPS, 0, tlDur())) * FPS));
+  }
 
   function renderTimeline() {
     if (!edits) return;
-    const step = STEPS.find((s) => tlX(s) >= 56) || STEPS[STEPS.length - 1];
+    const step = STEPS.find((s) => axX(s) >= 56) || STEPS[STEPS.length - 1];
     let ruler = '';
-    for (let t = 0; t <= duration + 1e-6; t += step) ruler += `<span style="left:${tlX(t)}px">${fmtTick(t, step)}</span>`;
+    for (let t = 0; t <= tlDur() + 1e-6; t += step) ruler += `<span style="left:${axX(t)}px">${fmtTick(t, step)}</span>`;
     tlRuler.innerHTML = ruler;
 
     const marks = (take ? take.events || [] : []).map((ev) => `<div class="mark ${ev.type}" style="left:${tlX(ev.t)}px"></div>`).join('');
-    const anims = (take ? take.animSpans || [] : []).map((sp) => {
+    const anims = (take ? take.animSpans || [] : []).filter((sp) => !sp.track).map((sp) => {
       const end = sp.end == null ? duration : sp.end;
       return `<div class="anim" style="left:${tlX(sp.start)}px;width:${Math.max(2, tlX(end) - tlX(sp.start))}px"></div>`;
     }).join('');
@@ -580,25 +780,30 @@
       + `<div class="shade" style="left:0;width:${a}px"></div><div class="shade" style="left:${b}px;right:0"></div>`
       + `<div class="kept" style="left:${a}px;width:${b - a}px"></div>`
       + `<div class="handle in" data-edge="in" style="left:${a}px" title="Start ${fmt(edits.in)}"></div>`
-      + `<div class="handle out" data-edge="out" style="left:${b}px" title="End ${fmt(edits.out)}"></div>`;
+      + `<div class="handle out" data-edge="out" style="left:${b}px" title="End ${fmt(edits.out)}"></div>`
+      + cuts().map((c, j) => `<div class="seam${j === selCut ? ' sel' : ''}" data-cut="${j}" style="left:${tlX(c.start)}px" title="${(c.end - c.start).toFixed(2)} s cut out at ${fmt(c.start)} · click, then ⌫ to put it back"></div>`).join('')
+      + (cutSel ? `<div class="cutsel" style="left:${tlX(cutSel.start)}px;width:${Math.max(1, tlX(cutSel.end) - tlX(cutSel.start))}px"></div>` : '');
+    renderCuts();
 
     tlCursor.innerHTML = edits.spans.map((sp, j) => {
       const w = Math.max(3, tlX(sp.end) - tlX(sp.start));
       return `<div class="span${j === selSpan ? ' selected' : ''}" data-span="${j}" style="left:${tlX(sp.start)}px;width:${w}px" title="Cursor shown ${fmt(sp.start)} – ${fmt(sp.end)}"><span class="x" data-remove-span="${j}" title="Remove">×</span></div>`;
     }).join('');
+    renderAnim();
     renderPlayhead();
   }
 
   function renderPlayhead() {
     if (!duration) return;
-    tlPlayhead.style.left = `${tlVideo.offsetLeft + tlX(current / FPS)}px`;
-    $('clock').innerHTML = `${fmt(current / FPS)} <span>/ ${fmt(duration)}</span>`;
+    const t = previewOn() ? dispT : current / FPS;
+    tlPlayhead.style.left = `${tlVideo.offsetLeft + tlX(t)}px`;
+    $('clock').innerHTML = `${fmt(previewOn() ? t : toProg(t))} <span>/ ${fmt(tlDur())}</span>`;
   }
 
   // Snap to the playhead, the trim and other spans' edges when within a few px.
   function snapT(t, skip) {
     const pxPer = trackWidth() / duration;
-    const points = [0, duration, edits.in, edits.out, current / FPS];
+    const points = [0, duration, edits.in, edits.out, current / FPS, ...animKeys().map((k) => k.t)];
     edits.spans.forEach((sp, j) => j !== skip && points.push(sp.start, sp.end));
     let best = snapFrame(t);
     let dist = 6 / pxPer;
@@ -635,10 +840,1096 @@
     changed();
   }
 
+  // ---- Animation -------------------------------------------------------------
+  // Each animation the take played, laid out where it played: Scroll shows its
+  // lines' moves and holds, Path its cursor path. They're the page's track as
+  // saved now, so they can be changed here: drag keyframes and points to
+  // retime them, drag a click to another point, or edit the selection in the
+  // Animation section. Changes are what plays from now on; the video only
+  // shows them once it's re-recorded.
+  const tlScroll = $('tl-scroll');
+  const tlPath = $('tl-path');
+  const EASINGS = [
+    ['Linear', [0, 0, 1, 1]],
+    ['Ease', [0.25, 0.1, 0.25, 1]],
+    ['Ease in-out · sine', [0.37, 0, 0.63, 1]],
+    ['Ease in-out · cubic', [0.65, 0, 0.35, 1]],
+    ['Ease in-out · quint', [0.83, 0, 0.17, 1]],
+    ['Ease in-out · expo', [0.87, 0, 0.13, 1]],
+    ['Ease out · cubic', [0.33, 1, 0.68, 1]],
+    ['Ease out · expo', [0.16, 1, 0.3, 1]],
+    ['Ease in · cubic', [0.32, 0, 0.67, 0]],
+  ];
+  const PATH_EASES = [['recorded', 'As recorded'], ['ease', 'Ease in-out'], ['out', 'Ease out'], ['linear', 'Linear']];
+  const MIN_MOVE = 50; // ms
+  const MIN_PATH_MOVE = 30; // ms
+  const copyJ = (o) => JSON.parse(JSON.stringify(o));
+  const sameJ = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const sameCurve = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+
+  let plays = []; // [{ start, end (s), key, recorded: { stops, path }, shift (s) }]
+  let plans = {}; // page key -> { stops, path }, as saved now
+  let animSel = null; // { p, kind: 'line' | 'path' | 'point', i }: the one shown in the Animation section
+  let lineSel = new Set(); // every selected line, as 'p:i' (⌘ or ⇧-click adds more)
+  let animDrag = null;
+
+  const planOf = (p) => (plays[p].key && plans[plays[p].key]) || plays[p].recorded;
+  const layoutMemo = new Map(); // plan -> layout
+  function layoutOf(p) {
+    const plan = planOf(p);
+    if (!layoutMemo.has(plan)) layoutMemo.set(plan, TrackModel.layout(plan.stops || [], plan.path || null));
+    return layoutMemo.get(plan);
+  }
+  const editedKey = (key) => {
+    const rec = plays.find((pl) => pl.key === key).recorded;
+    const now = plans[key];
+    return !!now && (!sameJ(now.stops || [], rec.stops || []) || !sameJ(now.path || null, rec.path || null));
+  };
+  // shift: an animation moved later or earlier as a whole (for re-recording).
+  const anyEdited = () => Object.keys(plans).some(editedKey) || plays.some((pl) => pl.shift);
+  const pageName = (key) => {
+    try {
+      const u = new URL(key);
+      return u.host + (u.pathname === '/' ? '' : u.pathname);
+    } catch {
+      return key || 'Unknown page';
+    }
+  };
+
+  // Where play p's moments land on the timeline, and how far it runs: as far
+  // as it played, or with changes, up to the next animation. Previewing
+  // changes, everything sits on the changed timing.
+  const playStart = (p) => (previewOn() ? changesMap().playD[p] : plays[p].start + (plays[p].shift || 0));
+  const at = (p, ms) => playStart(p) + ms / 1000;
+  function limitOf(p) {
+    if (previewOn()) return Math.min(tlDur(), playStart(p) + changesMap().playE[p]);
+    const next = plays[p + 1] ? plays[p + 1].start + (plays[p + 1].shift || 0) : duration;
+    return Math.min(duration, (plays[p].key && editedKey(plays[p].key)) || plays[p].shift ? next : Math.min(plays[p].end, next));
+  }
+
+  // ---- Previewing changes ------------------------------------------------------
+  // The recording retimed to follow the changes: each animation plays on its
+  // changed timing, showing the recorded frame where the page was at the same
+  // point of the same move (or path point), and the stretches between keep
+  // their length. Slowed down a lot it shows repeated frames, sped up it
+  // skips; a re-record films it properly.
+  let dispT = 0; // s on the changed timing
+  let mapMemo = null;
+  const previewOn = () => !!edits && plays.length > 0 && $('pv').checked && anyEdited();
+  const recLayouts = new Map();
+  const recLayout = (p) => {
+    const r = plays[p].recorded;
+    if (!recLayouts.has(r)) recLayouts.set(r, TrackModel.layout(r.stops || [], r.path || null));
+    return recLayouts.get(r);
+  };
+
+  function invertEase(fn, f) {
+    let lo = 0, hi = 1;
+    for (let k = 0; k < 24; k++) {
+      const mid = (lo + hi) / 2;
+      if (fn(mid) < f) lo = mid;
+      else hi = mid;
+    }
+    return (lo + hi) / 2;
+  }
+
+  // Changed elapsed ms -> recorded elapsed ms, for one animation.
+  function playMapper(Lr, Le) {
+    const a = Lr.segs, b = Le.segs;
+    const aligned = a.length === b.length && a.every((sg, k) => sg.kind === b[k].kind && sg.i === b[k].i);
+    if (!aligned) return (e) => (Le.total ? (e * Lr.total) / Le.total : 0);
+    return (e) => {
+      let k = b.findIndex((sg) => e < sg.end);
+      if (k < 0) k = b.length - 1;
+      const sb = b[k], sa = a[k];
+      const pb = sb.end > sb.start ? clamp((e - sb.start) / (sb.end - sb.start), 0, 1) : 1;
+      if (sb.kind === 'move' && sa.to !== sa.from && sb.to !== sb.from) {
+        return sa.start + invertEase(sa.ease, sb.ease(pb)) * (sa.end - sa.start);
+      }
+      if (sb.kind === 'path' && Lr.path && Le.path) {
+        const ra = [...Lr.path.tl.arrivals, Lr.path.tl.end];
+        const ea = [...Le.path.tl.arrivals, Le.path.tl.end];
+        if (ra.length === ea.length) {
+          const et = e - sb.start;
+          let j = 0;
+          while (j < ea.length - 2 && et >= ea[j + 1]) j++;
+          const span = ea[j + 1] - ea[j];
+          const local = span > 0 ? clamp((et - ea[j]) / span, 0, 1) : 1;
+          return sa.start + ra[j] + local * (ra[j + 1] - ra[j]);
+        }
+      }
+      return sa.start + pb * (sa.end - sa.start);
+    };
+  }
+
+  // The changed timing laid against the recording: pieces of the timeline,
+  // each with the stretch of recording it shows.
+  function changesMap() {
+    if (mapMemo) return mapMemo;
+    const pieces = [];
+    const playD = [];
+    const playE = [];
+    let d = 0, src = 0;
+    plays.forEach((pl, p) => {
+      const Lr = recLayout(p);
+      const Le = layoutOf(p);
+      const R = Math.max(0, Math.min(Lr.total / 1000, pl.end - pl.start));
+      const cut = pl.end - pl.start < Lr.total / 1000 - 0.05; // stopped partway: leave it as it was
+      const E = cut ? R : Le.total / 1000;
+      const gap = Math.max(0, pl.start - src + (pl.shift || 0));
+      pieces.push({ d0: d, d1: d + gap, s0: src, s1: Math.max(src, pl.start) });
+      d += gap;
+      playD[p] = d;
+      playE[p] = E;
+      const fn = cut ? (e) => e : playMapper(Lr, Le);
+      pieces.push({ d0: d, d1: d + E, s0: pl.start, s1: pl.start + R, fn });
+      d += E;
+      src = pl.start + R;
+    });
+    pieces.push({ d0: d, d1: d + Math.max(0, duration - src), s0: src, s1: duration });
+    d += Math.max(0, duration - src);
+    const toSource = (t) => {
+      const pc = pieces.find((q) => t < q.d1) || pieces[pieces.length - 1];
+      if (pc.fn) return clamp(pc.s0 + pc.fn((t - pc.d0) * 1000) / 1000, pc.s0, pc.s1);
+      return pc.d1 > pc.d0 ? pc.s0 + ((clamp(t, pc.d0, pc.d1) - pc.d0) / (pc.d1 - pc.d0)) * (pc.s1 - pc.s0) : pc.s0;
+    };
+    mapMemo = { total: Math.max(d, 1 / FPS), playD, playE, toSource };
+    return mapMemo;
+  }
+
+  // Show the changed timing at t: the recorded frame it maps to.
+  function showDisplay(t) {
+    dispT = clamp(t, 0, tlDur());
+    const i = clamp(Math.round(changesMap().toSource(dispT) * FPS), 0, frames - 1);
+    if (i !== current || !video.seeking) {
+      current = i;
+      video.currentTime = (current + 0.25) / FPS;
+    }
+    drawOverlay();
+    renderPlayhead();
+  }
+
+  let pvPlay = null; // { last, raf }
+  function togglePreviewPlay() {
+    if (pvPlay) return stopPreviewPlay();
+    if (dispT >= tlDur() - 1 / FPS) dispT = 0;
+    pvPlay = { last: performance.now(), raf: 0 };
+    $('play').textContent = '❚❚';
+    const tick = (now) => {
+      if (!pvPlay) return;
+      dispT = Math.min(tlDur(), dispT + (now - pvPlay.last) / 1000);
+      pvPlay.last = now;
+      // Seek only once the last seek has landed; frames drop rather than queue.
+      const i = clamp(Math.round(changesMap().toSource(dispT) * FPS), 0, frames - 1);
+      if (!video.seeking && i !== current) {
+        current = i;
+        video.currentTime = (current + 0.25) / FPS;
+      }
+      drawOverlay();
+      renderPlayhead();
+      if (dispT >= tlDur()) return stopPreviewPlay();
+      pvPlay.raf = requestAnimationFrame(tick);
+    };
+    pvPlay.raf = requestAnimationFrame(tick);
+  }
+  function stopPreviewPlay() {
+    if (!pvPlay) return;
+    cancelAnimationFrame(pvPlay.raf);
+    pvPlay = null;
+    $('play').textContent = '▶';
+  }
+
+  // The changes moved: lay them out again, staying on the same moment.
+  function changesChanged() {
+    mapMemo = null;
+    document.body.classList.toggle('anim-edited', anyEdited());
+    const on = previewOn();
+    document.body.classList.toggle('previewing', on);
+    if (on !== wasPreviewing) {
+      // Switching between timings: find the same frame on the other one.
+      if (on) {
+        const target = current / FPS;
+        let lo = 0, hi = tlDur();
+        for (let k = 0; k < 40; k++) {
+          const mid = (lo + hi) / 2;
+          if (changesMap().toSource(mid) < target) lo = mid;
+          else hi = mid;
+        }
+        dispT = hi;
+      } else stopPreviewPlay();
+      wasPreviewing = on;
+      renderTimeline();
+    }
+    if (on && !pvPlay) showDisplay(dispT);
+  }
+  let wasPreviewing = false;
+  $('pv').addEventListener('change', () => {
+    $('pv').blur();
+    if (playing()) video.pause();
+    changesChanged();
+    renderTimeline();
+  });
+
+  // Keyframes in video seconds, for snapping the trim and cursor spans.
+  function animKeys() {
+    const out = [];
+    plays.forEach((_, p) => {
+      const L = layoutOf(p);
+      const lim = limitOf(p);
+      const push = (ms) => at(p, ms) <= lim && out.push(at(p, ms));
+      for (const ln of L.lines) push(ln.arrive), push(ln.depart);
+      if (L.path) {
+        push(L.path.start);
+        for (const a of L.path.tl.arrivals) push(L.path.body + a);
+      }
+    });
+    return out;
+  }
+
+  function renderAnim() {
+    document.body.classList.toggle('no-anim', !plays.length);
+    document.body.classList.toggle('has-plays', plays.some((pl) => pl.key));
+    if (!plays.length) return;
+    let scroll = '';
+    let pathHtml = '';
+    plays.forEach((pl, p) => {
+      const L = layoutOf(p);
+      const plan = planOf(p);
+      const lim = limitOf(p);
+      const x = (ms) => tlX(Math.min(lim, at(p, ms)));
+      const shown = (ms) => at(p, ms) <= lim + 1e-6;
+      const isSel = (kind, i) => (kind === 'line' ? lineSel.has(`${p}:${i}`) : animSel && animSel.p === p && animSel.kind === kind && (i == null || animSel.i === i));
+      for (const sg of L.segs) {
+        if (!shown(sg.start)) continue;
+        const w = Math.max(1, x(sg.end) - x(sg.start));
+        if (sg.kind === 'move' || sg.kind === 'hold') {
+          scroll += `<div class="aseg ${sg.kind}${isSel('line', sg.i) ? ' sel' : ''}" data-kind="line" data-p="${p}" data-i="${sg.i}" style="left:${x(sg.start)}px;width:${w}px" title="Line ${sg.i + 1} · ${sg.kind === 'move' ? `move ${((sg.end - sg.start) / 1000).toFixed(2)} s` : `hold ${((sg.end - sg.start) / 1000).toFixed(2)} s`}">${sg.kind === 'move' && w > 14 ? sg.i + 1 : ''}</div>`;
+        } else scroll += `<div class="aseg gap" style="left:${x(sg.start)}px;width:${w}px"></div>`;
+      }
+      L.lines.forEach((ln, i) => {
+        const sel = isSel('line', i) ? ' sel' : '';
+        if (shown(ln.depart)) scroll += `<div class="key depart${sel}" data-kind="key" data-which="depart" data-p="${p}" data-i="${i}" style="left:${x(ln.depart)}px" title="End of line ${i + 1}'s hold"></div>`;
+        if (shown(ln.arrive)) {
+          scroll += `<div class="key${sel}" data-kind="key" data-which="arrive" data-p="${p}" data-i="${i}" style="left:${x(ln.arrive)}px" title="Line ${i + 1} arrives"></div>`;
+          if (plan.stops[i] && plan.stops[i].click) scroll += `<div class="aclick static" style="left:${x(ln.arrive)}px" title="Clicks here"></div>`;
+        }
+      });
+      if (L.path && shown(L.path.start)) {
+        const b = L.path;
+        const w = Math.max(4, x(b.end) - x(b.start));
+        const lead = Math.max(0, x(b.body) - x(b.start));
+        pathHtml += `<div class="pblock${isSel('path') ? ' sel' : ''}" data-kind="path" data-p="${p}" style="left:${x(b.start)}px;width:${w}px" title="Cursor path · ${pageName(pl.key)}"><div class="lead" style="width:${lead}px"></div><span style="position:relative;margin-left:${lead}px">${w - lead > 34 ? 'Path' : ''}</span></div>`;
+        b.tl.arrivals.forEach((a, j) => {
+          if (!shown(b.body + a)) return;
+          const target = animDrag && animDrag.type === 'click' && animDrag.p === p && animDrag.target === j;
+          pathHtml += `<div class="point${j === 0 ? ' first' : ''}${isSel('point', j) ? ' sel' : ''}${target ? ' target' : ''}" data-kind="point" data-p="${p}" data-i="${j}" style="left:${x(b.body + a)}px" title="Point ${j + 1}"></div>`;
+        });
+        for (const e of b.tl.events) {
+          if (e.type !== 'down' || !shown(b.body + e.T)) continue;
+          pathHtml += `<div class="aclick" data-kind="click" data-p="${p}" data-i="${e.anchor}" style="left:${x(b.body + e.T)}px" title="Click at point ${e.anchor + 1} · drag to another point"></div>`;
+        }
+      }
+    });
+    tlScroll.innerHTML = scroll;
+    tlPath.innerHTML = pathHtml;
+    const keys = [...new Set(plays.filter((pl) => pl.key).map((pl) => pl.key))];
+    const edited = keys.filter(editedKey);
+    $('lbl-scroll').classList.toggle('edited', edited.some((k) => !sameJ(plans[k].stops, plays.find((pl) => pl.key === k).recorded.stops)));
+    $('lbl-path').classList.toggle('edited', edited.some((k) => !sameJ(plans[k].path || null, plays.find((pl) => pl.key === k).recorded.path || null)));
+    const moved = plays.some((pl) => pl.shift);
+    $('anim-edited').hidden = !edited.length && !moved;
+    $('anim-sub').textContent = `${plays.length} played${edited.length || moved ? ' · changed' : ''}`;
+  }
+
+  // ---- Animation: the selection ------------------------------------------------
+  const field = (f, label, value, unit, { step = 0.05, disabled = false } = {}) => `<div class="field"><label>${label}</label>
+    <input class="num" data-af="${f}" type="number" step="${step}" min="0" value="${value}"${disabled ? ' disabled' : ''}><span class="unit">${unit}</span></div>`;
+
+  function renderAnimPanel() {
+    const body = $('anim-body');
+    if (body.contains(document.activeElement) && document.activeElement.matches('input')) return;
+    if (!animSel || !plays[animSel.p]) {
+      body.innerHTML = plays.length ? '<p class="note">Click a block on the Scroll or Path track to change it.</p>' : '';
+      return;
+    }
+    const pl = plays[animSel.p];
+    const plan = planOf(animSel.p);
+    const fixed = !pl.key;
+    const head = (title, sub) => `<h3>${title}<span title="${pl.key || ''}">${sub || pageName(pl.key)}</span></h3>${fixed ? '<p class="note">This page\'s animation has changed since, so this one can only be looked at.</p>' : ''}`;
+    if (animSel.kind === 'line') {
+      const s = plan.stops[animSel.i];
+      if (!s) return (body.innerHTML = '');
+      const preset = EASINGS.findIndex(([, e]) => sameCurve(e, s.easing));
+      const many = lineSel.size > 1 ? `<p class="note">${lineSel.size} lines selected: drag any of them to move them together, ⌫ deletes them.</p>` : '';
+      body.innerHTML = head(`Line ${animSel.i + 1}`) + many
+        + field('y', 'Scroll to', s.y, 'px', { step: 1, disabled: fixed })
+        + field('duration', 'Move', s.duration / 1000, 's', { disabled: fixed })
+        + field('hold', 'Hold', s.hold / 1000, 's', { disabled: fixed })
+        + `<div class="field"><label>Ease</label><select data-af="preset"${fixed ? ' disabled' : ''}>${EASINGS.map(([n], j) => `<option value="${j}"${j === preset ? ' selected' : ''}>${n}</option>`).join('')}<option value="custom"${preset < 0 ? ' selected' : ''}>Custom</option></select></div>`;
+    } else if (animSel.kind === 'path') {
+      body.innerHTML = head('Cursor path')
+        + `<div class="field"><label>Starts</label><select data-af="start"${fixed ? ' disabled' : ''}><option value="">Right away</option>${plan.stops.map((s, i) => `<option value="${i}"${plan.path.startAfter === i ? ' selected' : ''}>At line ${i + 1} · ${s.y}px</option>`).join('')}</select></div>`
+        + (TrackModel.cueOf(plan.stops, plan.path) != null ? field('pdelay', 'Delay', +(TrackModel.cueDelay(plan.stops, plan.path) / 1000).toFixed(2), 's', { disabled: fixed }) : '');
+    } else {
+      const path = plan.path;
+      const a = path && path.anchors[animSel.i];
+      if (!a) return (body.innerHTML = '');
+      const seg = path.segments[animSel.i];
+      const piece = layoutOf(animSel.p).path.tl.pieces.find((q) => q.kind === 'move' && q.i === animSel.i);
+      const down = a.buttons.find((b) => b.type === 'down');
+      body.innerHTML = head(`Point ${animSel.i + 1}`, `of ${path.anchors.length} · ${pageName(pl.key)}`)
+        + field('move', 'Move', seg && piece ? +(piece.len / 1000).toFixed(2) : '', 's', { disabled: fixed || !seg })
+        + field('pause', 'Pause', +(a.pause / 1000).toFixed(2), 's', { disabled: fixed })
+        + `<div class="field"><label>Ease</label><select data-af="pease"${fixed || !seg ? ' disabled' : ''}>${PATH_EASES.map(([v, n]) => `<option value="${v}"${seg && (seg.ease || 'recorded') === v ? ' selected' : ''}>${n}</option>`).join('')}</select></div>`
+        + `<div class="field"><label>Click</label><div class="row"><button class="btn sm${down ? ' on' : ''}" data-aact="click"${fixed ? ' disabled' : ''}>${down ? 'Clicks here' : 'No click'}</button></div></div>`
+        + (down ? field('wait', 'Click after', +((down.at + (down.wait || 0)) / 1000).toFixed(2), 's', { disabled: fixed }) : '');
+    }
+  }
+
+  // `add`: ⌘ or ⇧-click, which adds a line to the selection or takes it out.
+  function selectAnim(next, add) {
+    if (add && next && next.kind === 'line') {
+      const k = `${next.p}:${next.i}`;
+      if (lineSel.has(k) && lineSel.size > 1) {
+        lineSel.delete(k);
+        const [first] = lineSel;
+        const [p, i] = first.split(':').map(Number);
+        animSel = { p, kind: 'line', i };
+      } else {
+        if (!animSel || animSel.kind !== 'line') lineSel.clear();
+        lineSel.add(k);
+        animSel = next;
+      }
+    } else {
+      animSel = next;
+      lineSel = new Set(next && next.kind === 'line' ? [`${next.p}:${next.i}`] : []);
+    }
+    renderAnim();
+    renderAnimPanel();
+    drawPathEdit();
+  }
+
+  // The selected lines, by page: { key: [i, …] } (and the plays they're in).
+  function selectedLines() {
+    const byKey = new Map();
+    for (const k of lineSel) {
+      const [p, i] = k.split(':').map(Number);
+      const key = plays[p] && plays[p].key;
+      if (!key) continue;
+      if (!byKey.has(key)) byKey.set(key, { plays: new Set(), lines: new Set() });
+      byKey.get(key).plays.add(p);
+      byKey.get(key).lines.add(i);
+    }
+    return byKey;
+  }
+
+  // Moves lines S (indices) by d ms as blocks: the hold before each gives or
+  // takes the time and its own hold the opposite, so lines next to each other
+  // move together and the line after stays put. ⇧ (ripple) instead stretches
+  // only the hold before the first, carrying everything after along.
+  function moveLines(stops, S, d, ripple) {
+    const st = copyJ(stops);
+    const sel = [...S].filter((i) => i > 0 && st[i]).sort((a, b) => a - b);
+    if (!sel.length) return st;
+    const coef = st.map(() => 0); // how each hold changes with d
+    if (ripple) coef[sel[0] - 1] = 1;
+    else {
+      for (const i of sel) {
+        coef[i - 1] += 1;
+        coef[i] -= 1;
+      }
+    }
+    let lo = -Infinity, hi = Infinity;
+    coef.forEach((c, k) => {
+      if (c > 0) lo = Math.max(lo, -st[k].hold / c);
+      if (c < 0) hi = Math.min(hi, st[k].hold / -c);
+    });
+    const dd = Math.max(lo, Math.min(hi, d));
+    coef.forEach((c, k) => (st[k].hold = Math.round(st[k].hold + c * dd)));
+    return st;
+  }
+
+  // Deletes what's selected: lines (keeping the path on the line it started
+  // at, or the one before), the whole path, or a path point.
+  function deleteAnimSelection() {
+    if (!animSel) return false;
+    const key = plays[animSel.p] && plays[animSel.p].key;
+    if (!key) return true;
+    if (animSel.kind === 'point') {
+      removePoint(animSel.p, animSel.i);
+      return true;
+    }
+    record();
+    if (animSel.kind === 'path') {
+      setPlan(key, { path: null }, true);
+    } else {
+      for (const [k, { lines }] of selectedLines()) {
+        const plan = plans[k];
+        const stops = TrackModel.removeLines(plan.stops, lines);
+        let path = plan.path;
+        if (path && path.startAfter != null) {
+          path = copyJ(path);
+          const was = path.startAfter;
+          const gone = [...lines].filter((i) => i <= was).length;
+          if (lines.has(was)) path.startAfter = was - gone >= 0 ? was - gone : null;
+          else path.startAfter = was - gone;
+          if (path.startAfter == null || !stops.length) delete path.startAfter;
+        }
+        setPlan(k, { stops, path }, true);
+      }
+    }
+    selectAnim(null);
+    return true;
+  }
+
+  // Moves of whole animations are kept with the recording, for re-recording.
+  function persistShifts() {
+    edits.shifts = plays.map((pl) => pl.shift || 0);
+    narc.state(edits, dirty);
+  }
+
+  // ---- Animation: changing it ----------------------------------------------------
+  // A change saves the page's track or path straight away; undo covers it.
+  function setPlan(key, next, save) {
+    const before = plans[key];
+    plans[key] = { stops: next.stops || before.stops, path: next.path === undefined ? before.path : next.path };
+    if (save) {
+      if (!sameJ(before.stops, plans[key].stops)) narc.animSet(key, plans[key].stops);
+      if (plans[key].path && !sameJ(before.path, plans[key].path)) narc.pathSet(key, plans[key].path);
+      else if (!plans[key].path && before.path) narc.pathDelete(key);
+    }
+    changesChanged();
+    renderAnim();
+    drawPathEdit();
+  }
+
+  function animEdit(tag, key, next) {
+    record(tag);
+    setPlan(key, next, true);
+    renderAnimPanel();
+  }
+
+  $('anim-body').addEventListener('input', (e) => {
+    const f = e.target.dataset.af;
+    if (!f || !animSel) return;
+    const key = plays[animSel.p].key;
+    if (!key) return;
+    const plan = plans[key];
+    const v = parseFloat(e.target.value);
+    if (animSel.kind === 'line') {
+      if (f === 'preset') {
+        if (e.target.value === 'custom') return;
+        e.target.blur();
+        return setLineEasing(animSel.p, animSel.i, EASINGS[+e.target.value][1]);
+      }
+      if (Number.isNaN(v)) return;
+      const stops = copyJ(plan.stops);
+      const s = stops[animSel.i];
+      if (f === 'y') s.y = Math.max(0, Math.round(v));
+      else s[f] = Math.round(Math.max(f === 'duration' ? 0.05 : 0, v) * 1000);
+      animEdit(`anim:${f}:${animSel.i}`, key, { stops });
+    } else if (animSel.kind === 'path' && f === 'pdelay') {
+      if (Number.isNaN(v)) return;
+      const path = copyJ(plan.path);
+      const ms = Math.round(Math.max(0, v) * 1000);
+      if (ms) path.startDelay = ms;
+      else delete path.startDelay;
+      animEdit('anim:pdelay', key, { path });
+    } else if (animSel.kind === 'path' && f === 'start') {
+      e.target.blur();
+      setPathStart(animSel.p, e.target.value === '' ? null : +e.target.value);
+    } else if (animSel.kind === 'point') {
+      const path = copyJ(plan.path);
+      const a = path.anchors[animSel.i];
+      if (f === 'pease') {
+        path.segments[animSel.i].ease = e.target.value;
+        e.target.blur();
+      } else {
+        if (Number.isNaN(v)) return;
+        if (f === 'pause') a.pause = Math.max(0, Math.round(v * 1000));
+        else if (f === 'move') {
+          const b = path.anchors[animSel.i + 1];
+          const recorded = b.t - (a.t + a.dwell);
+          if (recorded <= 0) return;
+          path.segments[animSel.i].scale = Math.max(0.05, Math.round((Math.max(MIN_PATH_MOVE, v * 1000) / recorded) * 1000) / 1000);
+        } else if (f === 'wait') {
+          // The click's delay after the pointer arrives; the release follows it.
+          const down = a.buttons.find((b) => b.type === 'down');
+          const shift = Math.max(0, Math.round(v * 1000)) - (down.at + (down.wait || 0));
+          for (const b of a.buttons) b.wait = Math.max(0, (b.wait || 0) + shift);
+        }
+      }
+      animEdit(`anim:${f}:p${animSel.i}`, key, { path });
+    }
+  });
+
+  $('anim-body').addEventListener('click', (e) => {
+    const act = e.target.closest('[data-aact]');
+    if (!act || !animSel || animSel.kind !== 'point') return;
+    act.blur();
+    toggleClick(animSel.p, animSel.i);
+  });
+
+  function setLineEasing(p, i, easing) {
+    const key = plays[p].key;
+    const stops = copyJ(plans[key].stops);
+    stops[i].easing = [...easing];
+    animEdit(`anim:preset:${i}`, key, { stops });
+  }
+
+  // When play p's path starts: right away (null) or at line i.
+  function setPathStart(p, i) {
+    const key = plays[p].key;
+    const path = copyJ(plans[key].path);
+    if (i == null) delete path.startAfter;
+    else path.startAfter = i;
+    delete path.startDelay;
+    animEdit(null, key, { path });
+  }
+
+  function toggleClick(p, i) {
+    const key = plays[p].key;
+    const path = copyJ(plans[key].path);
+    const a = path.anchors[i];
+    if (a.buttons.some((b) => b.type === 'down')) a.buttons = [];
+    else clickAt(a, null);
+    animEdit(null, key, { path });
+  }
+
+  // As ⌫ in the path editor; the first and last points stay.
+  function removePoint(p, i) {
+    const key = plays[p].key;
+    const path = plans[key].path;
+    if (i === 0 || i === path.anchors.length - 1) return;
+    animEdit(null, key, { path: CursorPath.removeAnchor(path, i) });
+    selectAnim(null);
+  }
+
+  // Puts a click on point a, as the path editor does: the pointer holds still
+  // for it if it was only passing through.
+  function clickAt(a, like) {
+    const button = (like && like.button) || 'left';
+    const count = (like && like.count) || 1;
+    a.buttons = [{ at: 0, wait: 0, type: 'down', button, count }, { at: Math.min(a.dwell, 90), wait: a.dwell >= 90 ? 0 : 90, type: 'up', button, count }];
+    if (a.dwell < 90) a.pause = Math.max(a.pause, 150);
+  }
+
+  // Scroll keyframes: an arrival moves the end of its line's move, a departure
+  // the end of its hold; the keyframes either side stay put (⇧ pushes
+  // everything after along instead). The same as the timeline (⌘T).
+  function retimeLine(base, i, which, d, ripple) {
+    const st = copyJ(base);
+    const s = st[i];
+    if (which === 'arrive') {
+      let dd = Math.max(MIN_MOVE, s.duration + d) - s.duration;
+      if (!ripple) {
+        dd = Math.min(dd, s.hold);
+        s.hold -= dd;
+      }
+      s.duration += dd;
+    } else {
+      let dd = Math.max(0, s.hold + d) - s.hold;
+      if (!ripple && st[i + 1]) {
+        dd = Math.min(dd, st[i + 1].duration - MIN_MOVE);
+        st[i + 1].duration -= dd;
+      }
+      s.hold += dd;
+    }
+    for (const x of st) {
+      x.duration = Math.round(x.duration);
+      x.hold = Math.round(x.hold);
+    }
+    return st;
+  }
+
+  // A path point: the move into it stretches and the move out gives the time
+  // back, so later points stay put (⇧: they move along).
+  function retimeAnchor(base, j, d, ripple) {
+    const p = copyJ(base);
+    const a = p.anchors;
+    const rec = (k) => a[k + 1].t - (a[k].t + a[k].dwell);
+    const plen = (k) => rec(k) * (p.segments[k].scale || 1);
+    const k = j - 1;
+    if (rec(k) <= 0) return p;
+    const before = plen(k);
+    let dd = Math.max(MIN_PATH_MOVE, before + d) - before;
+    if (!ripple && p.segments[j] && rec(j) > 0) {
+      const after = plen(j);
+      dd = Math.min(dd, after - MIN_PATH_MOVE);
+      p.segments[j].scale = Math.round(((after - dd) / rec(j)) * 1000) / 1000;
+    }
+    p.segments[k].scale = Math.round(((before + dd) / rec(k)) * 1000) / 1000;
+    return p;
+  }
+
+  function animMouseDown(e) {
+    if (e.button !== 0 || !edits) return;
+    const el = e.target.closest('[data-kind]');
+    if (!el) {
+      selectAnim(null);
+      return false;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (playing()) video.pause();
+    const p = +el.dataset.p;
+    const i = el.dataset.i == null ? null : +el.dataset.i;
+    const kind = el.dataset.kind;
+    const key = plays[p].key;
+    const L = layoutOf(p);
+    const plan = planOf(p);
+    const base = { snap: snapshot(), plan: copyJ(plan) };
+    if (kind === 'line') {
+      // ⌘ or ⇧-click adds it to the selection; a click scrubs, and holding
+      // and dragging moves its block (with every other selected one).
+      if (e.metaKey || e.shiftKey) {
+        selectAnim({ p, kind: 'line', i }, true);
+        return true;
+      }
+      if (!lineSel.has(`${p}:${i}`)) selectAnim({ p, kind: 'line', i });
+      else {
+        animSel = { p, kind: 'line', i };
+        renderAnimPanel();
+      }
+      scrubTo(e.clientX);
+      animDrag = { type: 'block', p, i, x0: e.clientX, base: { ...base, plans: copyJ(plans), shifts: plays.map((pl) => pl.shift || 0) }, moved: false, editable: !!key };
+    } else if (kind === 'key') {
+      selectAnim({ p, kind: 'line', i });
+      if (key) animDrag = { type: 'key', p, i, which: el.dataset.which, x0: e.clientX, base, moved: false };
+    } else if (kind === 'path') {
+      selectAnim({ p, kind: 'path' });
+      scrubTo(e.clientX);
+      animDrag = { type: 'pblock', p, x0: e.clientX, grab: tlT(e.clientX) - at(p, L.path.start), base: { ...base, shift: plays[p].shift || 0 }, moved: false, editable: !!key };
+    } else if (kind === 'point') {
+      selectAnim({ p, kind: 'point', i });
+      const t = at(p, L.path.body + L.path.tl.arrivals[i]);
+      if (previewOn()) showDisplay(t);
+      else seekFrame(Math.round(t * FPS));
+      if (key && i > 0) animDrag = { type: 'point', p, i, x0: e.clientX, base, moved: false };
+    } else if (kind === 'click') {
+      selectAnim({ p, kind: 'point', i });
+      if (key) animDrag = { type: 'click', p, i, target: i, x0: e.clientX, base, moved: false };
+    }
+    if (animDrag) document.body.classList.add('dragging');
+    return true;
+  }
+
+  function animMouseMove(e) {
+    const d = animDrag;
+    if (!d.moved && Math.abs(e.clientX - d.x0) < 3) return;
+    if (d.editable === false) return;
+    d.moved = true;
+    const key = plays[d.p].key;
+    const ms = (tlT(e.clientX) - tlT(d.x0)) * 1000;
+    if (d.type === 'block') {
+      // Every selected line moves; a first line moves its whole animation.
+      for (const [k, { plays: ps, lines }] of selectedLines()) {
+        if (lines.has(0)) {
+          for (const p of ps) plays[p].shift = Math.max(-plays[p].start, d.base.shifts[p] + ms / 1000);
+          continue;
+        }
+        plans[k] = d.base.plans[k];
+        setPlan(k, { stops: moveLines(d.base.plans[k].stops, lines, ms, e.shiftKey) });
+      }
+      changesChanged();
+      renderAnim();
+      return;
+    }
+    if (d.type === 'pblock') {
+      const plan = d.base.plan;
+      if (!plan.stops.length) {
+        plays[d.p].shift = Math.max(-plays[d.p].start, d.base.shift + ms / 1000);
+        changesChanged();
+        renderAnim();
+        return;
+      }
+      // Anywhere in a line's hold (snapping to its arrival), or right away.
+      const want = (tlT(e.clientX) - d.grab - playStart(d.p)) * 1000;
+      const snapMs = (6 / trackWidth()) * tlDur() * 1000;
+      const best = TrackModel.pathSlot(plan.stops, want, snapMs);
+      const path = copyJ(plan.path);
+      if (best.cue == null) delete path.startAfter;
+      else path.startAfter = best.cue;
+      if (best.cue != null && best.delay) path.startDelay = best.delay;
+      else delete path.startDelay;
+      if (!sameJ(path, plans[key].path)) setPlan(key, { path });
+      return;
+    }
+    if (d.type === 'key') {
+      if (d.which && d.base.plan.stops[d.i].hold === 0 && d.first == null) d.which = d.first = ms > 0 ? 'depart' : 'arrive';
+      setPlan(key, { stops: retimeLine(d.base.plan.stops, d.i, d.which, ms, e.shiftKey) });
+    } else if (d.type === 'point') {
+      setPlan(key, { path: retimeAnchor(d.base.plan.path, d.i, ms, e.shiftKey) });
+    } else if (d.type === 'click') {
+      // To whichever point is nearest.
+      const L = layoutOf(d.p);
+      const t = tlT(e.clientX);
+      let best = d.i, dist = Infinity;
+      L.path.tl.arrivals.forEach((a, j) => {
+        const dd = Math.abs(at(d.p, L.path.body + a) - t);
+        if (dd < dist) {
+          dist = dd;
+          best = j;
+        }
+      });
+      d.target = best;
+      renderAnim();
+    }
+  }
+
+  function animMouseUp() {
+    const d = animDrag;
+    animDrag = null;
+    document.body.classList.remove('dragging');
+    if (!d.moved) return renderAnim();
+    const key = plays[d.p].key;
+    if (d.type === 'block') {
+      pushSnapshot(d.base.snap);
+      // Save what the drag left, page by page.
+      for (const k of Object.keys(plans)) {
+        const now = plans[k];
+        if (sameJ(now, d.base.plans[k])) continue;
+        plans[k] = d.base.plans[k];
+        setPlan(k, now, true);
+      }
+      persistShifts();
+      renderAnimPanel();
+      return;
+    }
+    if (d.type === 'pblock' && !d.base.plan.stops.length) {
+      // A whole animation moved: only re-recording uses it.
+      pushSnapshot(d.base.snap);
+      persistShifts();
+      renderAnimPanel();
+      return;
+    }
+    if (d.type === 'click') {
+      if (d.target === d.i) return renderAnim();
+      const path = copyJ(plans[key].path);
+      const from = path.anchors[d.i];
+      const like = from.buttons.find((b) => b.type === 'down');
+      from.buttons = [];
+      clickAt(path.anchors[d.target], like);
+      pushSnapshot(d.base.snap);
+      setPlan(key, { path }, true);
+      selectAnim({ p: d.p, kind: 'point', i: d.target });
+      return;
+    }
+    pushSnapshot(d.base.snap);
+    // Save what the drag left.
+    const now = plans[key];
+    plans[key] = d.base.plan;
+    setPlan(key, now, true);
+    renderAnimPanel();
+  }
+
+  // Put every page back as it was recorded.
+  function revertAnim() {
+    record();
+    for (const pl of plays) pl.shift = 0;
+    persistShifts();
+    for (const key of Object.keys(plans)) {
+      const rec = plays.find((pl) => pl.key === key).recorded;
+      setPlan(key, { stops: copyJ(rec.stops || []), path: rec.path ? copyJ(rec.path) : plans[key].path }, true);
+    }
+    changesChanged();
+    renderAnim();
+    renderAnimPanel();
+  }
+  $('anim-revert').addEventListener('click', () => {
+    $('anim-revert').blur();
+    revertAnim();
+  });
+
+  // Re-record: the same animations in the same order, with the same pauses
+  // between them, played as they are now.
+  function rerecordPlan() {
+    const loads = ((take && take.events) || []).filter((ev) => ev.type === 'load').map((ev) => ev.t);
+    const kept = plays.filter((pl, p) => {
+      // One cut short by playing again straight away is left out.
+      const next = plays[p + 1];
+      return pl.key && !(next && next.key === pl.key && Number.isFinite(pl.end) && next.start - pl.end < 0.05);
+    });
+    const out = kept.map((pl, j) => {
+      const prev = kept[j - 1];
+      const prevEnd = prev ? Math.min(prev.end, pl.start) : 0;
+      const load = loads.filter((t) => t <= pl.start && t >= prevEnd).pop();
+      const shift = (pl.shift || 0) * 1000;
+      return {
+        key: pl.key,
+        lead: Math.max(0, (load != null ? Math.round(Math.min(8, pl.start - load) * 1000) : 0) + (prev ? 0 : shift)),
+        gap: prev ? Math.max(0, Math.round(Math.min(10, Math.max(0, pl.start - prevEnd)) * 1000 + shift)) : 0,
+      };
+    });
+    const last = kept[kept.length - 1];
+    return { plays: out, tail: last ? Math.round(Math.max(0.5, duration - Math.min(duration, last.end)) * 1000) : 1000, cursor: edits.cursor };
+  }
+  const rerecord = () => {
+    $('rerecord').blur();
+    $('anim-rerecord').blur();
+    narc.rerecord(rerecordPlan());
+  };
+  $('rerecord').addEventListener('click', rerecord);
+  $('anim-rerecord').addEventListener('click', rerecord);
+
+  // Changes made elsewhere (⌘., ⌘T, the path editor).
+  narc.onTrack((data) => {
+    if (!plans[data.key]) return;
+    plans[data.key] = { ...plans[data.key], stops: data.stops || [] };
+    renderAnim();
+    renderAnimPanel();
+  });
+  narc.onPath((data) => {
+    if (!plans[data.key] || sameJ(data.path || null, plans[data.key].path || null)) return;
+    plans[data.key] = { ...plans[data.key], path: data.path || null };
+    renderAnim();
+    renderAnimPanel();
+  });
+
+  for (const el of [tlScroll, tlPath]) {
+    el.addEventListener('mousedown', (e) => {
+      if (animMouseDown(e) === false) {
+        // Empty track scrubs.
+        if (e.button !== 0) return;
+        e.preventDefault();
+        if (playing()) video.pause();
+        drag = { kind: 'scrub' };
+        scrubTo(e.clientX);
+      }
+    });
+  }
+  window.addEventListener('mousemove', (e) => animDrag && animMouseMove(e));
+  window.addEventListener('mouseup', () => animDrag && animMouseUp());
+
+  // ---- Animation: the path on the video -------------------------------------------
+  // With a path or one of its points selected, the path is drawn over the
+  // video and edited there as in the path editor (⌘P): drag a point or its
+  // handles (⌥-drag a point for new handles, ⌥ on a handle bends just that
+  // side), double-click the curve to add a point, ⌫ removes the selected one.
+  const pathCanvas = $('pathedit');
+  let pathDrag = null;
+  const cssScale = () => (take && take.cursor && take.cursor.scale) || 1; // video px per page px
+  function pathEditPlay() {
+    if (!animSel || (animSel.kind !== 'point' && animSel.kind !== 'path')) return -1;
+    const pl = plays[animSel.p];
+    return pl && pl.key && planOf(animSel.p).path ? animSel.p : -1;
+  }
+
+  function drawPathEdit() {
+    const p = pathEditPlay();
+    document.body.classList.toggle('path-editing', p >= 0);
+    const dpr = devicePixelRatio;
+    const w = Math.round(pathCanvas.clientWidth * dpr);
+    const h = Math.round(pathCanvas.clientHeight * dpr);
+    if (!w || !h || !W) return;
+    if (pathCanvas.width !== w || pathCanvas.height !== h) {
+      pathCanvas.width = w;
+      pathCanvas.height = h;
+    }
+    const g = pathCanvas.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, w, h);
+    if (p < 0) return;
+    const path = planOf(p).path;
+    const f = (w / W) * cssScale(); // canvas px per page px
+    g.beginPath();
+    for (let i = 0; i < path.segments.length; i++) {
+      const c = CursorPath.cubicOf(path, i);
+      g.moveTo(c[0].x * f, c[0].y * f);
+      g.bezierCurveTo(c[1].x * f, c[1].y * f, c[2].x * f, c[2].y * f, c[3].x * f, c[3].y * f);
+    }
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.lineWidth = 4 * dpr;
+    g.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    g.stroke();
+    g.lineWidth = 2 * dpr;
+    g.strokeStyle = '#4da3ff';
+    g.stroke();
+    const sel = animSel.kind === 'point' ? animSel.i : -1;
+    const a = path.anchors[sel];
+    if (a) {
+      for (const hk of ['hin', 'hout']) {
+        if (!a[hk].x && !a[hk].y) continue;
+        const hx = (a.x + a[hk].x) * f, hy = (a.y + a[hk].y) * f;
+        g.beginPath();
+        g.moveTo(a.x * f, a.y * f);
+        g.lineTo(hx, hy);
+        g.lineWidth = dpr;
+        g.strokeStyle = '#4da3ff';
+        g.stroke();
+        g.beginPath();
+        g.arc(hx, hy, 4 * dpr, 0, Math.PI * 2);
+        g.fillStyle = '#fff';
+        g.fill();
+        g.stroke();
+      }
+    }
+    path.anchors.forEach((an, i) => {
+      const x = an.x * f, y = an.y * f;
+      if (an.buttons.some((b) => b.type === 'down')) {
+        g.beginPath();
+        g.arc(x, y, 11 * dpr, 0, Math.PI * 2);
+        g.lineWidth = 2 * dpr;
+        g.strokeStyle = '#ff4d2e';
+        g.stroke();
+      }
+      const s = 7 * dpr;
+      g.fillStyle = i === sel ? '#4da3ff' : '#fff';
+      g.strokeStyle = i === sel ? '#fff' : '#4da3ff';
+      g.lineWidth = 1.5 * dpr;
+      g.fillRect(x - s / 2, y - s / 2, s, s);
+      g.strokeRect(x - s / 2, y - s / 2, s, s);
+    });
+  }
+
+  // The mouse in page px, with a few screen px of tolerance.
+  function pagePos(e) {
+    const r = pathCanvas.getBoundingClientRect();
+    const k = (r.width / W) * cssScale();
+    return { x: (e.clientX - r.left) / k, y: (e.clientY - r.top) / k, tol: 8 / k };
+  }
+
+  function pathHit(p, q) {
+    const path = planOf(p).path;
+    const sel = animSel.kind === 'point' ? path.anchors[animSel.i] : null;
+    if (sel) {
+      for (const hk of ['hin', 'hout']) {
+        if ((sel[hk].x || sel[hk].y) && Math.hypot(sel.x + sel[hk].x - q.x, sel.y + sel[hk].y - q.y) <= q.tol) return { kind: 'handle', i: animSel.i, h: hk };
+      }
+    }
+    let best = null;
+    path.anchors.forEach((a, i) => {
+      const d = Math.hypot(a.x - q.x, a.y - q.y);
+      if (d <= q.tol && (!best || d < best.d)) best = { kind: 'anchor', i, d };
+    });
+    if (best) return best;
+    const L = layoutOf(p);
+    const near = L.path && L.path.tl.nearest(q.x, q.y);
+    return near && near.d <= q.tol ? { kind: 'curve', ...near } : null;
+  }
+
+  pathCanvas.addEventListener('mousedown', (e) => {
+    const p = pathEditPlay();
+    if (p < 0 || e.button !== 0) return;
+    e.preventDefault();
+    if (playing()) video.pause();
+    stopPreviewPlay();
+    const q = pagePos(e);
+    const h = pathHit(p, q);
+    const key = plays[p].key;
+    if (!h) return;
+    if (h.kind === 'curve') {
+      if (e.detail >= 2 && h.segment != null) {
+        animEdit(null, key, { path: CursorPath.insertAnchor(planOf(p).path, h.segment, h.f) });
+        selectAnim({ p, kind: 'point', i: h.segment + 1 });
+        return;
+      }
+      // Dragging the curve moves the whole path.
+      pathDrag = { p, key, kind: 'all', from: q, base: copyJ(planOf(p).path), snap: snapshot(), moved: false };
+      return;
+    }
+    if (h.kind === 'anchor') selectAnim({ p, kind: 'point', i: h.i });
+    pathDrag = { p, key, kind: h.kind === 'handle' ? 'handle' : e.altKey ? 'pull' : 'anchor', i: h.i, h: h.h, alt: e.altKey, from: q, base: copyJ(planOf(p).path), snap: snapshot(), moved: false };
+  });
+
+  pathCanvas.addEventListener('mousemove', (e) => {
+    const p = pathEditPlay();
+    if (p < 0 || pathDrag) return;
+    const h = pathHit(p, pagePos(e));
+    pathCanvas.style.cursor = !h ? 'default' : h.kind === 'curve' ? 'grab' : 'move';
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    const d = pathDrag;
+    if (!d) return;
+    const q = pagePos(e);
+    const next = copyJ(d.base);
+    const a = next.anchors[d.i];
+    if (d.kind === 'all') {
+      for (const an of next.anchors) {
+        an.x = Math.round((an.x + q.x - d.from.x) * 100) / 100;
+        an.y = Math.round((an.y + q.y - d.from.y) * 100) / 100;
+      }
+    } else if (d.kind === 'anchor') {
+      a.x = Math.round((a.x + q.x - d.from.x) * 100) / 100;
+      a.y = Math.round((a.y + q.y - d.from.y) * 100) / 100;
+    } else if (d.kind === 'pull') {
+      a.hout = { x: q.x - a.x, y: q.y - a.y };
+      a.hin = { x: a.x - q.x, y: a.y - q.y };
+    } else {
+      const other = d.h === 'hin' ? 'hout' : 'hin';
+      a[d.h] = { x: q.x - a.x, y: q.y - a.y };
+      // The opposite handle keeps its length but stays in line, unless ⌥ is held.
+      const ol = Math.hypot(a[other].x, a[other].y);
+      const l = Math.hypot(a[d.h].x, a[d.h].y);
+      if (!e.altKey && !d.alt && ol > 0 && l > 0) a[other] = { x: (-a[d.h].x / l) * ol, y: (-a[d.h].y / l) * ol };
+    }
+    d.moved = true;
+    setPlan(d.key, { path: next });
+  });
+
+  window.addEventListener('mouseup', () => {
+    const d = pathDrag;
+    if (!d) return;
+    pathDrag = null;
+    if (!d.moved) return;
+    pushSnapshot(d.snap);
+    const now = plans[d.key];
+    plans[d.key] = { ...now, path: d.base };
+    setPlan(d.key, now, true);
+    renderAnimPanel();
+  });
+
+  // Previewing changes, the pointer follows the changed path rather than
+  // the recorded one: where a path plays at the playhead, its point now.
+  function previewPointer() {
+    if (!previewOn()) return null;
+    const m = changesMap();
+    for (let p = 0; p < plays.length; p++) {
+      if (dispT < m.playD[p] || dispT >= m.playD[p] + m.playE[p]) continue;
+      const L = layoutOf(p);
+      const at = L.path && L.pathAt((dispT - m.playD[p]) * 1000);
+      if (!at) return null;
+      const s = L.path.tl.at(at.t);
+      return { x: s.x * cssScale(), y: s.y * cssScale() };
+    }
+    return null;
+  }
+
+  // ---- Timeline size --------------------------------------------------------------
+  // The grip above the timeline makes its tracks taller or shorter.
+  const TK_KEY = 'darc.editor.trackScale';
+  let tk = clamp(+localStorage.getItem(TK_KEY) || 1.5, 0.75, 3);
+  const applyTk = () => document.documentElement.style.setProperty('--tk', tk);
+  applyTk();
+  $('grip').addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const y0 = e.clientY, k0 = tk;
+    // Leaves the video at least 160 px.
+    const room = $('stage').clientHeight - 160;
+    const max = Math.min(3, k0 + room / 150);
+    document.body.classList.add('resizing');
+    const move = (ev) => {
+      tk = clamp(k0 + (y0 - ev.clientY) / 150, 0.75, Math.max(0.75, max));
+      applyTk();
+      renderTimeline();
+    };
+    const up = () => {
+      removeEventListener('mousemove', move);
+      removeEventListener('mouseup', up);
+      document.body.classList.remove('resizing');
+      localStorage.setItem(TK_KEY, tk);
+    };
+    addEventListener('mousemove', move);
+    addEventListener('mouseup', up);
+  });
+
   // drag: { kind: 'scrub' } | { kind: 'trim', edge } | { kind: 'span', mode, j, anchor, origin }, with `before` for undo
   let drag = null;
 
   function scrubTo(clientX) {
+    if (previewOn()) return showDisplay(tlT(clientX));
     seekFrame(Math.floor(tlT(clientX) * FPS));
   }
 
@@ -647,19 +1938,32 @@
       if (e.button !== 0 || !edits) return;
       e.preventDefault();
       if (playing()) video.pause();
-      const handle = e.target.closest('.handle');
+      const handle = !previewOn() && e.target.closest('.handle');
       if (handle) {
         drag = { kind: 'trim', edge: handle.dataset.edge, before: snapshot(), moved: false };
         document.body.classList.add('dragging');
         return;
       }
-      drag = { kind: 'scrub' };
+      const seam = !previewOn() && e.target.closest('.seam');
+      if (seam) {
+        selCut = +seam.dataset.cut;
+        cutSel = null;
+        renderTimeline();
+        return;
+      }
+      selCut = -1;
+      if (cutSel) {
+        cutSel = null;
+        renderTimeline();
+      }
+      // On the Video track a drag picks a stretch to cut; a click scrubs.
+      drag = el === tlVideo && !previewOn() ? { kind: 'range', x0: e.clientX, anchor: tlT(e.clientX), moved: false } : { kind: 'scrub' };
       scrubTo(e.clientX);
     });
   }
 
   tlCursor.addEventListener('mousedown', (e) => {
-    if (e.button !== 0 || !edits) return;
+    if (e.button !== 0 || !edits || previewOn()) return;
     e.preventDefault();
     const remove = e.target.closest('[data-remove-span]');
     if (remove) return removeSpan(+remove.dataset.removeSpan);
@@ -686,6 +1990,15 @@
   window.addEventListener('mousemove', (e) => {
     if (!drag) return;
     if (drag.kind === 'scrub') return scrubTo(e.clientX);
+    if (drag.kind === 'range') {
+      if (!drag.moved && Math.abs(e.clientX - drag.x0) < 3) return;
+      drag.moved = true;
+      const t = snapT(tlT(e.clientX), -1);
+      cutSel = { start: Math.min(drag.anchor, t), end: Math.max(drag.anchor, t) };
+      scrubTo(e.clientX);
+      renderTimeline();
+      return;
+    }
     drag.moved = true;
     if (drag.kind === 'trim') {
       setTrim(drag.edge, tlT(e.clientX));
@@ -724,7 +2037,7 @@
     const d = drag;
     drag = null;
     document.body.classList.remove('dragging', 'moving');
-    if (d.kind === 'scrub') return;
+    if (d.kind === 'scrub' || d.kind === 'range') return;
     if (d.kind === 'span' && d.mode === 'create') {
       const sp = edits.spans[d.j];
       // A click (or a tiny drag) on empty track adds nothing.
@@ -822,10 +2135,11 @@
         output: (frame) => {
           try {
             const i = Math.round((frame.timestamp / 1e6) * FPS);
-            if (i < first || i >= last || error || job.cancelled) return;
+            if (i < first || i >= last || error || job.cancelled || cutAt(i / FPS)) return;
             ctx.drawImage(frame, 0, 0, W, H);
             drawCursor(ctx, i);
-            const f = new VideoFrame(canvas, { timestamp: Math.round(((i - first) * 1e6) / FPS), duration: Math.round(1e6 / FPS) });
+            // Frames run on without gaps where something was cut.
+            const f = new VideoFrame(canvas, { timestamp: Math.round((encoded * 1e6) / FPS), duration: Math.round(1e6 / FPS) });
             encoder.encode(f, { keyFrame: encoded % (FPS * 2) === 0 });
             f.close();
             encoded++;
@@ -902,7 +2216,7 @@
       // Cursor images have to be loaded before they can be drawn.
       if (layer) await Promise.all([...Object.values(layer.builtin), ...layer.images.values(), layer.custom].filter(Boolean).map((img) => img.decode().catch(() => {})));
       if (sim == null && take) sim = simulate(false);
-      const whole = inFrame() === 0 && outFrame() >= frames;
+      const whole = inFrame() === 0 && outFrame() >= frames && !cuts().length;
       if (whole && !anyVisible) {
         status('Saving…');
         res = await narc.copy();
@@ -917,7 +2231,7 @@
         dirty = false;
         narc.state(edits, dirty);
         document.body.classList.add('saved');
-        status(`Saved <b>${res.name}</b> · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+        status(`Saved <b>${res.name}</b> · ${((performance.now() - t0) / 1000).toFixed(1)} s${anyEdited() ? ' · without the animation changes (Re-record films them)' : ''}`);
       }
     } catch (err) {
       console.error(err);
@@ -955,6 +2269,117 @@
   });
   narc.onBusy(() => status('Saving · cancel it first to close'));
 
+  // ---- Right-click -----------------------------------------------------------
+  // Selects what's under the pointer as a click would, then offers the same
+  // edits as the Animation section, the buttons and the keys.
+  function contextTarget(el) {
+    const a = el.closest('#tl-scroll [data-kind], #tl-path [data-kind]');
+    if (a) return { kind: a.dataset.kind === 'key' ? 'line' : a.dataset.kind, p: +a.dataset.p, i: a.dataset.i == null ? null : +a.dataset.i };
+    const seam = !previewOn() && el.closest('#tl-video .seam');
+    if (seam) return { kind: 'seam', i: +seam.dataset.cut };
+    const span = el.closest('#tl-cursor .span');
+    if (span) return { kind: 'span', i: +span.dataset.span };
+    if (el.closest('#tl-ruler, #tl-video')) return { kind: 'video' };
+    if (el.closest('#tl-scroll, #tl-path')) return { kind: 'anim' };
+    return null;
+  }
+
+  function contextItems(h) {
+    const pv = previewOn();
+    const anim = [
+      { id: 'revert', label: 'Revert animation', enabled: !$('anim-edited').hidden },
+      { id: 'rerecord', label: 'Re-record', enabled: plays.some((pl) => pl.key) },
+    ];
+    if (h.kind === 'seam') return [{ id: 'restore-cut', label: 'Put this cut back', accelerator: 'Backspace' }];
+    if (h.kind === 'video') {
+      return [
+        ...(cutSel && !pv ? [{ id: 'cut', label: `Cut out ${(cutSel.end - cutSel.start).toFixed(2)} s`, accelerator: 'Backspace' }, { type: 'separator' }] : []),
+        { id: 'in', label: 'Set start here', accelerator: 'I', enabled: !pv },
+        { id: 'out', label: 'Set end here', accelerator: 'O', enabled: !pv },
+        { id: 'trim-reset', label: 'Reset trim', enabled: !pv && (edits.in > 0 || edits.out < duration) },
+      ];
+    }
+    if (h.kind === 'span') return [{ id: 'delete-span', label: 'Delete span', accelerator: 'Backspace', enabled: !pv }];
+    if (h.kind === 'anim') return anim;
+    const fixed = !plays[h.p].key;
+    const plan = planOf(h.p);
+    if (h.kind === 'line') {
+      const n = lineSel.has(`${h.p}:${h.i}`) ? lineSel.size : 1;
+      return [
+        { label: 'Ease', enabled: !fixed, submenu: EASINGS.map(([nm, ez], j) => ({ id: `ease:${j}`, label: nm, checked: sameCurve(ez, plan.stops[h.i].easing) })) },
+        { type: 'separator' },
+        { id: 'delete-lines', label: n > 1 ? `Delete ${n} lines` : `Delete line ${h.i + 1}`, accelerator: 'Backspace', enabled: !fixed },
+        { type: 'separator' },
+        ...anim,
+      ];
+    }
+    if (h.kind === 'path') {
+      return [
+        {
+          label: 'Starts',
+          enabled: !fixed,
+          submenu: [
+            { id: 'start:', label: 'Right away', checked: plan.path.startAfter == null },
+            ...plan.stops.map((_, i) => ({ id: `start:${i}`, label: `At line ${i + 1}`, checked: plan.path.startAfter === i })),
+          ],
+        },
+        { type: 'separator' },
+        { id: 'delete-path', label: 'Delete path', accelerator: 'Backspace', enabled: !fixed },
+        { type: 'separator' },
+        ...anim,
+      ];
+    }
+    if (h.kind === 'click') return [{ id: 'click', label: 'Remove click', enabled: !fixed }];
+    const ends = h.i === 0 || h.i === plan.path.anchors.length - 1;
+    return [
+      { id: 'click', label: plan.path.anchors[h.i].buttons.some((b) => b.type === 'down') ? 'Remove click' : 'Click here', enabled: !fixed },
+      { id: 'delete-point', label: 'Delete point', enabled: !fixed && !ends },
+    ];
+  }
+
+  function contextSelect(h) {
+    // A right-click on one of several selected lines keeps them all.
+    if (h.kind === 'line' && lineSel.has(`${h.p}:${h.i}`)) animSel = { p: h.p, kind: 'line', i: h.i };
+    else if (h.kind === 'line' || h.kind === 'path') selectAnim({ p: h.p, kind: h.kind, i: h.i });
+    else if (h.kind === 'point' || h.kind === 'click') selectAnim({ p: h.p, kind: 'point', i: h.i });
+    else if (h.kind === 'span' && !previewOn()) {
+      selSpan = h.i;
+      renderTimeline();
+    }
+  }
+
+  function contextAction(id, h, clientX) {
+    if (!id || !edits || saving) return;
+    if (id === 'revert') revertAnim();
+    else if (id === 'rerecord') rerecord();
+    else if (id === 'in' || id === 'out') {
+      if (previewOn()) return;
+      if (playing()) video.pause();
+      scrubTo(clientX);
+      trimToPlayhead(id);
+    } else if (id === 'trim-reset') !previewOn() && resetTrim();
+    else if (id === 'cut') cutSelection();
+    else if (id === 'restore-cut') restoreCut(h.i);
+    else if (id === 'delete-span') !previewOn() && edits.spans[h.i] && removeSpan(h.i);
+    else if (!plays[h.p] || !plays[h.p].key) {
+      // Only looked at.
+    } else if (id.startsWith('ease:')) setLineEasing(h.p, h.i, EASINGS[+id.slice(5)][1]);
+    else if (id.startsWith('start:')) setPathStart(h.p, id === 'start:' ? null : +id.slice(6));
+    else if (id === 'click') toggleClick(h.p, h.i);
+    else if (id === 'delete-point') removePoint(h.p, h.i);
+    else if (id === 'delete-lines' || id === 'delete-path') deleteAnimSelection();
+  }
+
+  window.addEventListener('contextmenu', async (e) => {
+    if (e.target.matches('input, textarea')) return; // the usual editing menu
+    e.preventDefault();
+    const h = edits && !saving && !drag && !animDrag ? contextTarget(e.target) : null;
+    if (!h) return;
+    if (playing()) video.pause();
+    contextSelect(h);
+    contextAction(await narc.menu(contextItems(h)), h, e.clientX);
+  });
+
   // ---- Keyboard --------------------------------------------------------------
   window.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
@@ -974,15 +2399,27 @@
     if (mod || e.altKey) return;
     const k = e.key;
     if (k === ' ') play();
+    else if ((k === 'ArrowLeft' || k === 'ArrowRight') && previewOn()) {
+      stopPreviewPlay();
+      showDisplay(dispT + (k === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 1 / FPS));
+    } else if (previewOn() && (k === 'Home' || k === 'End')) showDisplay(k === 'Home' ? 0 : tlDur());
+    else if (previewOn() && (k === 'i' || k === 'I' || k === 'o' || k === 'O')) status('Trim the recording with Preview changes off');
     else if (k === 'ArrowLeft' || k === 'ArrowRight') {
       if (playing()) video.pause();
-      seekFrame(current + (k === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? FPS : 1));
+      stepFrames((k === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? FPS : 1));
     } else if (k === 'Home') seekFrame(inFrame());
     else if (k === 'End') seekFrame(outFrame() - 1);
     else if (k === 'i' || k === 'I') trimToPlayhead('in');
     else if (k === 'o' || k === 'O') trimToPlayhead('out');
+    else if ((k === 'Backspace' || k === 'Delete') && cutSel && !previewOn()) cutSelection();
+    else if ((k === 'Backspace' || k === 'Delete') && selCut >= 0) restoreCut(selCut);
     else if ((k === 'Backspace' || k === 'Delete') && selSpan >= 0) removeSpan(selSpan);
-    else if (k === 'Escape' && selSpan >= 0) {
+    else if ((k === 'Backspace' || k === 'Delete') && animSel) deleteAnimSelection();
+    else if (k === 'Escape' && (cutSel || selCut >= 0)) {
+      cutSel = null;
+      selCut = -1;
+      renderTimeline();
+    } else if (k === 'Escape' && selSpan >= 0) {
       selSpan = -1;
       renderTimeline();
     } else return;
@@ -1017,6 +2454,14 @@
       pointerLog = c.pointer.map(([t, x, y, inside, si, down]) => ({ t, x, y, inside: !!inside, shape: c.shapes[si] || { type: 'default' }, down: !!down }));
       animLog = c.anim.map(([t, on, elapsed]) => ({ t, playing: !!on, elapsed }));
       layer = new ReplayCursor({ settings: c.settings, spans: c.spans, scale: c.scale, images: c.images }, W, H);
+      // The animations it played, and their pages' tracks now.
+      if (info.plays) {
+        (take.animSpans || []).forEach((sp, j) => {
+          if (!sp.track) return;
+          plays.push({ start: sp.start, end: sp.end == null ? Infinity : sp.end, key: info.plays.plays[j].key, recorded: { stops: sp.track.stops || [], path: sp.track.path || null } });
+        });
+        plans = info.plays.plans || {};
+      }
     }
     const s = take ? take.cursor.settings : {};
     // The take's own image, unless it's still in the library.
@@ -1042,6 +2487,7 @@
       edits.spans = recordedSpans.map((sp) => ({ ...sp }));
       // Picks up where a kept take was left.
       if (take.edits) edits = { ...edits, ...take.edits, cursor: { ...edits.cursor, ...take.edits.cursor } };
+      if (edits.shifts) plays.forEach((pl, p) => (pl.shift = edits.shifts[p] || 0));
       // Its custom image may have left the library since.
       if (!customs.some((e) => e.id === edits.cursor.selected)) {
         edits.cursor.selected = firstCustom;
@@ -1055,6 +2501,8 @@
     narc.state(edits, dirty);
     renderCursor();
     renderTrim();
+    renderAnimPanel();
+    changesChanged();
 
     video.src = info.url;
     video.addEventListener('loadeddata', () => {

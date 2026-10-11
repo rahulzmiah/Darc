@@ -1,10 +1,11 @@
-const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen, shell, dialog } = require('electron');
+const { app, BaseWindow, BrowserWindow, WebContentsView, Menu, ipcMain, screen, shell, dialog, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { readMp4Index } = require('./mp4-index');
 const CursorPath = require('./cursor-path');
+const TrackModel = require('./track-model');
 
 const DEFAULTS = {
   mouseSpeed: 1,
@@ -57,18 +58,49 @@ if (store.cursor.custom) {
   }
 }
 
+// The line a newly captured path starts at: the one the page was at when
+// capturing began, so the lines play up to it first. `loose` also takes the
+// last line above where it began. Null (right away) near the top.
+function inferPathStart(saved, stops, loose) {
+  const sy0 = saved.scroll && saved.scroll.length ? saved.scroll[0][1] : 0;
+  if (!stops.length || sy0 <= 4) return null;
+  for (let i = stops.length - 1; i >= 0; i--) if (Math.abs(stops[i].y - sy0) <= 4) return i;
+  if (!loose) return null;
+  for (let i = stops.length - 1; i >= 0; i--) if (stops[i].y <= sy0) return i;
+  return null;
+}
+
+// Paths used to always start right away, even ones captured from a line deep
+// in the page, which then skipped every line. Start those at their line, once.
+if (!store.pathStartsInferred) {
+  for (const [key, saved] of Object.entries(store.paths || {})) {
+    if (saved.startAfter != null) continue;
+    const t = store.animations[key];
+    const i = inferPathStart(saved, Array.isArray(t) ? t : (t && t.stops) || [], false);
+    if (i != null) saved.startAfter = i;
+  }
+  store.pathStartsInferred = true;
+}
+
 let saveTimer;
 function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => fs.writeFileSync(storePath, JSON.stringify(store, null, 2)), 300);
 }
 
-let win, page, overlay, toast, animator, recorder, liveCursor, pathView;
+// Writes the settings now, rather than after the usual pause.
+function flushStore() {
+  clearTimeout(saveTimer);
+  fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
+}
+
+let win, page, overlay, toast, animator, recorder, liveCursor, pathView, timeline;
 let toastTimer;
 
 // Recording window, docked under the main window like the animation panel
 // sits beside it. Being its own window, it never touches the viewport.
 const RECORDER_HEIGHT = 112;
+const TIMELINE_HEIGHT = 400;
 const recorderQueue = []; // callbacks waiting for the recorder page to load
 let recording = null; // { fd, path, name } while the pane writes a file
 let recordingActive = false; // the pane is capturing (starting, recording or saving)
@@ -125,12 +157,156 @@ function recorderDock() {
   const gap = 8;
   const width = Math.min(main.width, area.width);
   const x = Math.max(area.x, Math.min(main.x, area.x + area.width - width));
-  const y = Math.min(main.y + main.height + gap, area.y + area.height - RECORDER_HEIGHT);
+  // Under the timeline when that's open.
+  const above = timelineOpen() ? timeline.getBounds() : main;
+  const y = Math.min(above.y + above.height + gap, area.y + area.height - RECORDER_HEIGHT);
   return { x, y: Math.max(area.y, y), width, height: RECORDER_HEIGHT };
 }
 
 function dockRecorder() {
   if (recorderOpen() && !win.isFullScreen()) recorder.setBounds(recorderDock());
+}
+
+// ---- Timeline ----------------------------------------------------------------
+// The page's animation laid out in time, After Effects style: the scroll
+// track's keyframes, the cursor path and the cursor spans as layers, docked
+// under the main window. Its playhead drives the page, and inside the path the
+// path view shows the pointer (and the path, to edit in place).
+const timelineOpen = () => !!timeline && !timeline.isDestroyed();
+
+function timelineDock() {
+  const main = win.getBounds();
+  const area = screen.getDisplayMatching(main).workArea;
+  const gap = 8;
+  const width = Math.min(main.width, area.width);
+  const height = Math.max(180, Math.min(store.timelineHeight || TIMELINE_HEIGHT, area.height));
+  const x = Math.max(area.x, Math.min(main.x, area.x + area.width - width));
+  const y = Math.min(main.y + main.height + gap, area.y + area.height - height);
+  return { x, y: Math.max(area.y, y), width, height };
+}
+
+function dockTimeline() {
+  if (timelineOpen() && !win.isFullScreen()) timeline.setBounds(timelineDock());
+  dockRecorder();
+}
+
+function sendToTimeline(channel, ...args) {
+  if (timelineOpen()) timeline.webContents.send(channel, ...args);
+}
+
+// The timeline and the animation panel work as a pair: focusing either one
+// raises the other too, so neither gets left behind the main window.
+function raisePartner(other) {
+  if (other && !other.isDestroyed() && other.isVisible() && !other.isMinimized()) other.moveTop();
+}
+
+// ⌘T, or P in the panel: open the timeline (and preview from it), or close it.
+function toggleTimeline(preview) {
+  if (timelineOpen()) {
+    if (preview) return sendToTimeline('tl:preview');
+    if (timeline.isFocused()) timeline.close();
+    else timeline.focus();
+    return;
+  }
+  timeline = new BrowserWindow({
+    ...timelineDock(),
+    minWidth: 480,
+    minHeight: 180,
+    title: 'Timeline',
+    frame: false,
+    roundedCorners: false,
+    hasShadow: true,
+    backgroundColor: '#0b0b0b',
+    webPreferences: {
+      preload: path.join(__dirname, 'timeline-preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false, // its clock drives the preview
+    },
+  });
+  timeline.loadFile(path.join(__dirname, 'timeline.html'));
+  if (preview) timeline.webContents.once('did-finish-load', () => sendToTimeline('tl:preview'));
+  dockRecorder();
+  timeline.on('resized', () => {
+    store.timelineHeight = timeline.getBounds().height;
+    save();
+    dockRecorder();
+  });
+  timeline.on('focus', () => raisePartner(animator));
+  timeline.on('closed', () => {
+    timeline = null;
+    dockPath(false);
+    dockRecorder();
+  });
+}
+
+// Cached layout of the current page's track and path, for driving the page.
+let layoutCache = null;
+function layoutFor(key) {
+  const { stops } = trackFor(key);
+  const p = pathFor(key);
+  if (!layoutCache || layoutCache.key !== key || layoutCache.stops !== stops || layoutCache.path !== p) {
+    layoutCache = { key, stops, path: p, L: TrackModel.layout(stops, p) };
+  }
+  return layoutCache.L;
+}
+
+// Show the path view for the timeline (or hide it again).
+function dockPath(on) {
+  if (!on) {
+    if (pathMode !== 'dock') return;
+    pathMode = null;
+    pathView.setVisible(false);
+    page.webContents.send('path:active', false);
+    syncLiveCursor();
+    return;
+  }
+  if (pathMode) return;
+  const key = animationKey();
+  const saved = pathFor(key);
+  if (!saved) return;
+  pathMode = 'dock';
+  syncLiveCursor();
+  page.webContents.send('path:active', true);
+  pathView.setVisible(true);
+  sendToPathView('path:dock', { key, path: saved, cursor: { ...cursorPayload(), smoothing: 0 }, spans: trackFor(key).cursor });
+}
+
+// Put the page where the animation is at time t: the scroll, and inside the
+// path, the pointer too.
+function driveTo(t) {
+  const key = animationKey();
+  if (!key || pathMode === 'play' || pathMode === 'preview') return;
+  const L = layoutFor(key);
+  const at = L.pathAt(t);
+  if (at) {
+    dockPath(true);
+    sendToPathView('path:drive', { ...at, elapsed: t });
+  } else {
+    dockPath(false);
+    page.webContents.send('anim:scrub', L.yAt(t));
+  }
+}
+
+// The track or the path changed in one window: show it in the others.
+const editorWindows = () => [...editors.values()].map((ed) => ed.win);
+
+function trackChanged(key, from) {
+  for (const w of [animator, timeline, ...editorWindows()]) {
+    if (w && !w.isDestroyed() && w.webContents !== from) w.webContents.send('anim:track', { key, ...trackFor(key) });
+  }
+  if (pathMode === 'dock' && key === animationKey()) sendToPathView('path:spans', trackFor(key).cursor);
+}
+
+function pathChanged(key, from) {
+  const saved = pathFor(key);
+  for (const w of [animator, timeline, ...editorWindows()]) {
+    if (w && !w.isDestroyed() && w.webContents !== from) w.webContents.send('anim:path', { key, path: saved });
+  }
+  if (pathMode === 'dock' && (!pathViewOpen() || pathView.webContents !== from)) {
+    if (saved && key === animationKey()) sendToPathView('path:update', saved);
+    else dockPath(false);
+  }
 }
 
 function openRecorder() {
@@ -206,6 +382,7 @@ function setRecordingActive(on) {
   }
   recordingActive = on;
   sendToAnimator('rec:state', on);
+  directorRecording(on);
   // The page streams its scroll velocity to the recorder while capturing.
   page.webContents.send('rec:motion', on);
   // Hand focus back to the page once capture starts, so space and the
@@ -347,15 +524,19 @@ function trackFor(key) {
   return { stops: t.stops || [], cursor: t.cursor || [] };
 }
 
-function saveTrack(key, track) {
+// `from`: the window that made the change, which already shows it.
+function saveTrack(key, track, from) {
   if (track.stops.length || track.cursor.length) store.animations[key] = track;
   else delete store.animations[key];
   save();
   syncCursorSpans();
+  trackChanged(key, from);
 }
 
+// The animation panel and the timeline both follow the page and its playback.
 function sendToAnimator(channel, data) {
   if (animator && !animator.isDestroyed()) animator.webContents.send(channel, data);
+  sendToTimeline(channel, data);
 }
 
 // ---- Cursor overlay settings -------------------------------------------------
@@ -706,6 +887,7 @@ function toggleAnimator() {
     store.animatorWidth = animator.getBounds().width;
     save();
   });
+  animator.on('focus', () => raisePartner(timeline));
   animator.on('closed', () => {
     animator = null;
   });
@@ -846,10 +1028,14 @@ async function capturePreview(job) {
   }
 }
 
-// The preview is captured in the background whenever the page loads or the
+// The preview is captured in the background whenever a new page loads or the
 // window resizes, so it's ready by the time the animation panel asks for it.
-// One capture runs at a time; a newer request for a different page supersedes it.
-let preview = null; // { id, job, promise }
+// Captures are kept per page and size: a reload, or coming back to a page,
+// reuses its capture straight away (Refresh in the panel takes a new one).
+// One capture runs at a time; a newer request supersedes it.
+const PREVIEW_KEEP = 8; // captures kept, most recently used last
+const previews = new Map(); // id -> { job, promise }
+let capturing = null; // the entry being captured
 let previewTimer;
 
 async function previewJob() {
@@ -865,24 +1051,36 @@ async function previewJob() {
 async function getPreview(force) {
   const job = await previewJob();
   if (!job) throw new Error('Nothing to capture');
-  if (!force && preview && preview.id === job.id) return preview.promise;
-  if (preview) preview.job.cancelled = true;
-  // Anyone still waiting on a superseded capture gets the one that replaced it.
+  const kept = previews.get(job.id);
+  if (!force && kept) {
+    previews.delete(job.id);
+    previews.set(job.id, kept);
+    return kept.promise;
+  }
+  if (capturing) capturing.job.cancelled = true;
+  // Anyone still waiting on a superseded capture of this page gets the one that replaced it.
   const promise = capturePreview(job).catch((err) => {
-    if (job.cancelled && preview) return preview.promise;
+    const now = previews.get(job.id);
+    if (job.cancelled && now && now !== entry) return now.promise;
     throw err;
   });
-  const entry = { id: job.id, job, promise };
-  preview = entry;
-  // Don't keep failures around; the next request should try again.
-  promise.catch(() => preview === entry && (preview = null));
+  const entry = { job, promise };
+  capturing = entry;
+  previews.delete(job.id);
+  previews.set(job.id, entry);
+  while (previews.size > PREVIEW_KEEP) previews.delete(previews.keys().next().value);
+  promise.finally(() => capturing === entry && (capturing = null)).catch(() => {});
+  // Don't keep failures around (a forced one falls back to the capture it was replacing).
+  promise.catch(() => {
+    if (previews.get(job.id) !== entry) return;
+    if (kept) previews.set(job.id, kept);
+    else previews.delete(job.id);
+  });
   return promise;
 }
 
-// A load (including a reload of the same URL) makes any earlier capture stale.
+// A load captures the page in the background, unless it's been captured already.
 function invalidatePreview() {
-  if (preview) preview.job.cancelled = true;
-  preview = null;
   schedulePreview();
 }
 
@@ -913,10 +1111,11 @@ function pageScrollY() {
 // visit to a page that already has a timeline asks whether to start over, so
 // re-recording doesn't pile new markers onto the old ones. A click marker
 // (⇧⌘K) also clicks wherever the mouse is now, once playback reaches it.
-async function setMarker(withClick) {
+// `at`: where to click instead of the mouse (the page's right-click menu).
+async function setMarker(withClick, at) {
   const key = animationKey();
   if (!key) return showToast('Open a page first · ⌘L');
-  const click = withClick === true ? mouseOverPage() : null;
+  const click = withClick === true ? at || mouseOverPage() : null;
   if (withClick === true && !click) return showToast('Point at the page to set a click');
   const saved = trackFor(key).stops;
   if (markerPrompt) {
@@ -951,8 +1150,8 @@ async function addMarker(key, reset, click) {
     sendToAnimator('anim:add-stop', { key, y, reset, click });
   } else {
     const track = trackFor(key);
-    // Easing is shared across the track, so follow the existing lines.
-    const easing = track.stops.length ? [...track.stops[0].easing] : [...DEFAULT_EASING];
+    // A new line eases like the last one.
+    const easing = track.stops.length ? [...track.stops[track.stops.length - 1].easing] : [...DEFAULT_EASING];
     const stops = reset ? [] : track.stops;
     stops.push({ y, duration: 1600, easing, hold: 600, ...(click && { click }) });
     saveTrack(key, { stops, cursor: reset ? [] : track.cursor });
@@ -976,8 +1175,8 @@ function playAnimation() {
   hideOverlay();
   win.focus();
   page.webContents.focus();
-  pathCued = false;
-  page.webContents.send('anim:play', stops, cue);
+  pathCued = null;
+  page.webContents.send('anim:play', stops, cue, cue == null ? 0 : cursorPath.startDelay || 0);
 }
 
 // DevTools get a window of their own: the live cursor view sits over the page
@@ -1116,6 +1315,7 @@ function buildMenu() {
       label: 'Animation',
       submenu: [
         { label: 'Animation Panel', accelerator: 'CmdOrCtrl+.', click: toggleAnimator },
+        { label: 'Timeline', accelerator: 'CmdOrCtrl+T', click: () => toggleTimeline(false) },
         { type: 'separator' },
         { label: 'Set Marker', accelerator: 'CmdOrCtrl+K', click: () => setMarker(false) },
         { label: 'Set Click Marker', accelerator: 'Shift+CmdOrCtrl+K', click: () => setMarker(true) },
@@ -1231,14 +1431,14 @@ function createWindow() {
   win.on('resize', layout);
   win.on('resize', schedulePreview);
   // The recording window follows the main window around.
-  win.on('move', dockRecorder);
-  win.on('resize', dockRecorder);
+  win.on('move', dockTimeline);
+  win.on('resize', dockTimeline);
   let viewportTimer;
   win.on('resize', () => {
     clearTimeout(viewportTimer);
     viewportTimer = setTimeout(() => sendToRecorder('rec:viewport', viewportPixels()), 150);
   });
-  win.on('leave-full-screen', dockRecorder);
+  win.on('leave-full-screen', dockTimeline);
   win.on('close', (e) => {
     if (recordingActive) {
       // Finish writing the file first; the pane reports back and we close then.
@@ -1258,6 +1458,7 @@ function createWindow() {
   win.on('closed', () => {
     if (recorderOpen()) recorder.destroy();
     if (animator && !animator.isDestroyed()) animator.destroy();
+    if (timelineOpen()) timeline.destroy();
     // Unsaved takes stay on disk, to open again later.
     for (const ed of editors.values()) {
       if (ed.out) {
@@ -1328,6 +1529,8 @@ function createWindow() {
   wc.on('did-navigate-in-page', () => sendToAnimator('anim:page-changed'));
   wc.on('did-finish-load', invalidatePreview);
   wc.on('did-navigate-in-page', schedulePreview);
+  // Only fires when the page didn't handle the right-click itself.
+  wc.on('context-menu', (_e, params) => pageMenu(params));
 
   // Always start blank with the URL bar open rather than reopening the last site.
   overlay.webContents.loadFile(path.join(__dirname, 'overlay.html'));
@@ -1374,15 +1577,130 @@ ipcMain.on('toast:answer', (_e, ok) => {
 
 ipcMain.handle('anim:load', () => {
   const key = animationKey();
-  return { key, ...trackFor(key) };
+  return { key, ...trackFor(key), path: pathFor(key) };
 });
 
 ipcMain.handle('anim:capture', (_e, force) => getPreview(force));
 
-ipcMain.on('anim:set', (_e, { key, stops, cursor }) => {
+ipcMain.on('anim:set', (e, { key, stops, cursor }) => {
   if (!key) return;
-  saveTrack(key, { stops: stops || [], cursor: cursor || [] });
+  saveTrack(key, { stops: stops || [], cursor: cursor || [] }, e.sender);
 });
+ipcMain.on('anim:drive', (_e, t) => driveTo(t));
+ipcMain.on('anim:timeline', (_e, preview) => toggleTimeline(preview));
+ipcMain.on('tl:close', () => timelineOpen() && timeline.close());
+// The grip along the timeline's bottom edge.
+ipcMain.on('tl:resize', (_e, height) => {
+  if (!timelineOpen()) return;
+  const b = timeline.getBounds();
+  const area = screen.getDisplayMatching(b).workArea;
+  const h = Math.round(Math.max(180, Math.min(height, area.y + area.height - b.y)));
+  timeline.setBounds({ ...b, height: h });
+  store.timelineHeight = h;
+  save();
+  dockRecorder();
+});
+// Undoing a deletion brings a path back, so it needn't exist yet.
+ipcMain.on('tl:path-set', (e, key, saved) => {
+  if (!key || !saved) return;
+  store.paths[key] = saved;
+  save();
+  pathChanged(key, e.sender);
+});
+ipcMain.on('tl:path-delete', (_e, key) => key && deletePath(key));
+ipcMain.on('tl:select-anchor', (_e, i) => pathMode === 'dock' && sendToPathView('path:select', i));
+// From the path view while docked: the timeline keeps the playhead and the keys.
+ipcMain.on('tl:dock-seek', (e, t) => pathViewOpen() && e.sender === pathView.webContents && sendToTimeline('tl:dock-seek', t));
+ipcMain.on('tl:dock-select', (e, i) => pathViewOpen() && e.sender === pathView.webContents && sendToTimeline('tl:dock-select', i));
+ipcMain.on('tl:dock-key', (e, k, shift) => pathViewOpen() && e.sender === pathView.webContents && sendToTimeline('tl:dock-key', k, shift));
+
+// ---- Context menus -----------------------------------------------------------
+// Renderers describe a menu as plain items ({ id, label, accelerator, enabled,
+// checked, submenu, role } or { type: 'separator' }); it pops up over their
+// window and resolves with the chosen item's id, or null if dismissed.
+const MENU_ROLES = new Set(['undo', 'redo', 'cut', 'copy', 'paste', 'selectAll']);
+const EDIT_ITEMS = [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'selectAll' }];
+
+function menuTemplate(items, choose) {
+  return (items || []).map((it) => {
+    if (it.type === 'separator') return { type: 'separator' };
+    if (MENU_ROLES.has(it.role)) return { role: it.role };
+    return {
+      label: String(it.label || ''),
+      enabled: it.enabled !== false,
+      ...(it.accelerator && { accelerator: it.accelerator, registerAccelerator: false }),
+      ...(it.checked != null && { type: 'checkbox', checked: !!it.checked }),
+      ...(it.submenu ? { submenu: menuTemplate(it.submenu, choose) } : { click: () => choose(it.id) }),
+    };
+  });
+}
+
+function popupMenu(items, window) {
+  return new Promise((resolve) => {
+    let done = false;
+    const choose = (id) => {
+      if (done) return;
+      done = true;
+      resolve(id ?? null);
+    };
+    const menu = Menu.buildFromTemplate(menuTemplate(items, choose));
+    // The close callback can run just before the chosen item's click.
+    menu.popup({ window, callback: () => setTimeout(() => choose(null), 50) });
+  });
+}
+
+ipcMain.handle('ctx:menu', (e, items) => {
+  if (!Array.isArray(items) || !items.length) return null;
+  return popupMenu(items, BrowserWindow.fromWebContents(e.sender) || win);
+});
+
+// Text fields in Darc's own windows get the usual editing menu.
+app.on('web-contents-created', (_e, wc) => {
+  wc.on('context-menu', (_e2, params) => {
+    if ((page && wc === page.webContents) || !params.isEditable || wc.getURL().startsWith('devtools:')) return;
+    popupMenu(EDIT_ITEMS, BrowserWindow.fromWebContents(wc) || win);
+  });
+});
+
+// The page's own menu, when the site doesn't have one: still a browser's
+// (navigation, editing, inspect), plus markers.
+async function pageMenu(params) {
+  const wc = page.webContents;
+  const h = wc.navigationHistory;
+  const items = [];
+  if (params.isEditable) {
+    items.push(...EDIT_ITEMS, { type: 'separator' });
+  } else if (params.selectionText) {
+    items.push({ role: 'copy' }, { type: 'separator' });
+  }
+  if (params.linkURL) items.push({ id: 'link', label: 'Copy Link Address' }, { type: 'separator' });
+  items.push(
+    { id: 'back', label: 'Back', accelerator: 'CmdOrCtrl+[', enabled: h.canGoBack() },
+    { id: 'forward', label: 'Forward', accelerator: 'CmdOrCtrl+]', enabled: h.canGoForward() },
+    { id: 'reload', label: 'Reload', accelerator: 'CmdOrCtrl+R' },
+    { type: 'separator' },
+    { id: 'marker', label: 'Set Marker', accelerator: 'CmdOrCtrl+K' },
+    { id: 'click', label: 'Set Click Marker Here', accelerator: 'Shift+CmdOrCtrl+K' },
+    { type: 'separator' },
+    { id: 'inspect', label: 'Inspect Element', accelerator: 'Alt+CmdOrCtrl+C' },
+  );
+  const id = await popupMenu(items, win);
+  if (id === 'link') clipboard.writeText(params.linkURL);
+  else if (id === 'back') h.canGoBack() && h.goBack();
+  else if (id === 'forward') h.canGoForward() && h.goForward();
+  else if (id === 'reload') wc.reload();
+  else if (id === 'marker') setMarker(false);
+  else if (id === 'click') setMarker(true, { x: Math.round(params.x), y: Math.round(params.y) });
+  else if (id === 'inspect') inspectAt(params.x, params.y);
+}
+
+// Inspect the element under a point, with DevTools in their own window as ⌥⌘I opens them.
+function inspectAt(x, y) {
+  const wc = page.webContents;
+  if (wc.isDevToolsOpened()) return wc.inspectElement(x, y);
+  wc.once('devtools-opened', () => wc.inspectElement(x, y));
+  wc.openDevTools({ mode: 'detach' });
+}
 
 ipcMain.handle('cursor:get', cursorPayload);
 ipcMain.on('cursor:live-get', (e) => {
@@ -1417,6 +1735,10 @@ ipcMain.on('anim:seek', (_e, y) => page.webContents.send('anim:seek', y));
 // asked for meanwhile, or if recordings start it.
 function afterRecordReload() {
   recordReload = null;
+  if (director) {
+    queuedPlay = false;
+    return directorPageReady();
+  }
   if (!queuedPlay && !store.playOnRecord) return;
   queuedPlay = false;
   setTimeout(() => recordingActive && playAnimation(), PLAY_AFTER_LOAD);
@@ -1432,6 +1754,11 @@ ipcMain.on('anim:click', (e, { x, y }) => {
   wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
   setTimeout(() => !wc.isDestroyed() && wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 }), 80);
 });
+// What's playing, for the editor to lay out alongside the footage.
+function playedTrack(key) {
+  return { key, stops: trackFor(key).stops, path: pathFor(key) };
+}
+
 function animProgress(data) {
   sendToAnimator('anim:progress', data);
   // The recorder times the pointer's cursor spans off playback.
@@ -1440,7 +1767,8 @@ function animProgress(data) {
   sendToLiveCursor('live:anim-progress', anim);
   if (!!data.playing !== animPlaying) {
     animPlaying = !!data.playing;
-    sendToRecorder('rec:event', { type: animPlaying ? 'anim-start' : 'anim-end', label: animPlaying ? 'Animation' : '' });
+    sendToRecorder('rec:event', { type: animPlaying ? 'anim-start' : 'anim-end', label: animPlaying ? 'Animation' : '', ...(animPlaying && { track: playedTrack(animationKey()) }) });
+    directorPlayback(animPlaying || pathPlaying);
   }
 }
 
@@ -1457,7 +1785,10 @@ let pathPlaying = false;
 let pathPlayKey = null; // page whose path is playing
 let pathEnded = 0; // when a played path last finished, to carry on after a click that navigates
 let pathChainPending = false;
-let pathCued = false; // the path playing was started by the scroll animation reaching its line
+// The path playing was started by the scroll animation reaching its line:
+// { at, start, index }, the animation's elapsed time then, and when.
+let pathCued = null;
+let pathScrollY = 0; // where the playing path last put the page
 const PATH_CHAIN_WINDOW = 2000; // ms after a path ends that a navigation still carries on
 const PATH_CAPTURE_TAIL = 150; // ms to wait for the last click after the page starts to change
 
@@ -1496,6 +1827,7 @@ function togglePathCapture() {
 function startPathCapture() {
   const key = animationKey();
   if (!key) return showToast('Open a page first · ⌘L');
+  dockPath(false);
   if (pathMode) closePathView();
   if (overlayMode) hideOverlay();
   pathCapture = { key, viewport: viewportSize(), samples: [], clicks: [], ending: false };
@@ -1514,10 +1846,13 @@ function finishPathCapture(navigated) {
   const fitted = CursorPath.fit(cap);
   const clicks = fitted ? fitted.anchors.filter((a) => a.buttons.some((b) => b.type === 'down')).length : 0;
   if (!fitted || (fitted.anchors.length < 2 && !clicks)) return showToast('No cursor movement captured');
+  const start = inferPathStart(fitted, trackFor(cap.key).stops, true);
+  if (start != null) fitted.startAfter = start;
   store.paths[cap.key] = fitted;
   save();
+  pathChanged(cap.key);
   sendToRecorder('rec:cursor', recorderCursorPayload());
-  const what = `${(fitted.duration / 1000).toFixed(1)} s${clicks ? ` · ${clicks} click${clicks === 1 ? '' : 's'}` : ''}`;
+  const what = `${(fitted.duration / 1000).toFixed(1)} s${clicks ? ` · ${clicks} click${clicks === 1 ? '' : 's'}` : ''}${start != null ? ` · starts at line ${start + 1}` : ''}`;
   showToast(navigated ? `Page changed · path saved · ${what}` : `Cursor path saved · ${what} · ⌘P to edit`);
 }
 
@@ -1530,6 +1865,7 @@ async function openPathView(mode) {
   if (key !== animationKey()) return;
   if (pathCapture) finishPathCapture(false);
   if (overlayMode) hideOverlay();
+  dockPath(false);
   if (!pathCued) page.webContents.send('anim:stop');
   pathMode = mode;
   if (mode === 'play') pathPlayKey = key;
@@ -1571,6 +1907,7 @@ function deletePath(key) {
   delete store.paths[key];
   save();
   if (key === animationKey()) closePathView();
+  pathChanged(key);
   sendToRecorder('rec:cursor', recorderCursorPayload());
   showToast('Cursor path deleted');
 }
@@ -1584,18 +1921,22 @@ function stopAnimation() {
 function pathProgress(data) {
   const anim = { playing: !!data.playing, elapsed: data.elapsed || 0 };
   if (pathCued) {
-    // Part of the scroll animation, which waits for it and carries on after.
-    if (anim.playing) return;
-    pathCued = false;
+    // Part of the scroll animation, which waits for it and carries on after,
+    // its clock running on through the path.
+    const took = Date.now() - pathCued.start;
+    if (anim.playing) return animProgress({ playing: true, y: pathScrollY, elapsed: pathCued.at + took, index: pathCued.index });
+    pathCued = null;
     if (data.finished && pathMode === 'play') pathEnded = Date.now();
-    page.webContents.send(data.finished ? 'anim:resume' : 'anim:stop');
+    if (data.finished) page.webContents.send('anim:resume', took);
+    else page.webContents.send('anim:stop');
     return;
   }
   // The recorder times cursor spans off it, like the scroll animation.
   sendToRecorder('rec:anim-progress', anim);
   if (anim.playing === pathPlaying) return;
   pathPlaying = anim.playing;
-  sendToRecorder('rec:event', { type: pathPlaying ? 'anim-start' : 'anim-end', label: pathPlaying ? 'Path' : '' });
+  sendToRecorder('rec:event', { type: pathPlaying ? 'anim-start' : 'anim-end', label: pathPlaying ? 'Path' : '', ...(pathPlaying && { track: playedTrack(pathPlayKey) }) });
+  directorPlayback(animPlaying || pathPlaying);
   if (!pathPlaying && data.finished && pathMode === 'play') pathEnded = Date.now();
 }
 
@@ -1611,7 +1952,7 @@ function endCaptureForNavigation() {
 // its way off the page carries on into the next page's.
 function pathPageChanging() {
   endCaptureForNavigation();
-  pathCued = false; // the animation waiting on it goes with the page
+  pathCued = null; // the animation waiting on it goes with the page
   if (pathMode === 'play') {
     pathChainPending = !recordReload;
     sendToPathView('path:stop');
@@ -1619,6 +1960,7 @@ function pathPageChanging() {
     pathChainPending = true;
   }
   if (pathMode === 'edit') closePathView();
+  dockPath(false);
 }
 
 function playChainedPath(delay) {
@@ -1644,12 +1986,14 @@ function pathPageChanged() {
     playChainedPath(600);
   }
   if (pathMode === 'edit') closePathView();
+  dockPath(false);
 }
 
 // The scroll animation reached the path's line and is waiting for it.
-ipcMain.on('anim:cue', (e) => {
+ipcMain.on('anim:cue', (e, at) => {
   if (e.sender !== page.webContents) return;
-  pathCued = true;
+  pathCued = { at: (at && at.elapsed) || 0, index: at ? at.index : 0, start: Date.now() };
+  dockPath(false);
   openPathView('play');
 });
 
@@ -1663,6 +2007,7 @@ ipcMain.on('path:input', (e, ev) => {
   if (pathMode && e.sender === pathView.webContents) page.webContents.sendInputEvent(ev);
 });
 ipcMain.on('path:scroll', (e, y) => {
+  if (pathMode && e.sender === pathView.webContents) pathScrollY = y;
   if (pathMode && e.sender === pathView.webContents) page.webContents.send('path:scroll', y);
 });
 ipcMain.on('path:progress', (e, data) => e.sender === pathView.webContents && pathProgress(data));
@@ -1670,6 +2015,7 @@ ipcMain.on('path:set', (e, key, saved) => {
   if (e.sender !== pathView.webContents || !key || !saved) return;
   store.paths[key] = saved;
   save();
+  pathChanged(key, e.sender);
 });
 ipcMain.on('path:delete', (e, key) => e.sender === pathView.webContents && deletePath(key));
 ipcMain.on('path:close', (e) => e.sender === pathView.webContents && closePathView());
@@ -1794,7 +2140,7 @@ ipcMain.handle('rec:discard', (_e, file) => {
 // Open the last recording in the editor.
 ipcMain.on('rec:edit', () => {
   if (closingForRecording) return;
-  if (lastTake && fs.existsSync(lastTake)) openEditor(lastTake);
+  if (lastTake && fs.existsSync(lastTake)) openEditor(lastTake, rerecordCarry.splice(0)[0]);
   else showToast('No recording to edit · ⌘E');
 });
 
@@ -1816,6 +2162,162 @@ ipcMain.on('rec:reload', async () => {
   wc.reload();
 });
 
+// ---- Re-record ---------------------------------------------------------------
+// The editor's Re-record films a take again with the animations as they are
+// now: it records the first page from a reload and plays each animation the
+// take played, in order, leaving the same pauses between them. A path whose
+// click leads to another page still carries on into that page's path by
+// itself; otherwise the next page is opened when its turn comes. Once the last
+// one ends (and the take's tail has passed), recording stops and the new take
+// opens in the editor, with the old take's cursor style.
+// plan = { plays: [{ key, lead, gap }], tail, cursor } with times in ms: lead
+// after the page loads, gap after the previous animation ends.
+let director = null; // { plays, i, started, timer, watchdog }
+const rerecordCarry = []; // the edits the next take opens with
+
+function directorToast(text) {
+  showToast(`Re-recording · ${text} · ⌘E stops`);
+}
+
+function startRerecord(plan) {
+  if (recordingActive || director) return showToast('Already recording');
+  const plays = (plan.plays || []).filter((p) => p.key);
+  if (!plays.length) return showToast('Nothing to re-record');
+  director = { plays, i: 0, started: false, timer: 0, watchdog: 0, tail: Math.min(plan.tail || 1000, 3000), cursor: plan.cursor };
+  stopAnimation();
+  if (pathMode) closePathView();
+  hideOverlay();
+  win.focus();
+  const begin = () => {
+    if (!director) return;
+    directorToast(`1 of ${plays.length}`);
+    toggleRecording();
+  };
+  if (animationKey() === plays[0].key) begin();
+  else {
+    page.webContents.once('did-finish-load', () => setTimeout(begin, 300));
+    page.webContents.loadURL(plays[0].key);
+  }
+}
+
+function endDirector() {
+  if (!director) return;
+  clearTimeout(director.timer);
+  clearTimeout(director.watchdog);
+  director = null;
+}
+
+function directorRecording(on) {
+  if (!director) return;
+  if (!on) {
+    // Stopped: by the director at the end, or by hand.
+    if (director.done) rerecordCarry.push(director.cursor ? { cursor: director.cursor } : undefined);
+    endDirector();
+    return;
+  }
+  // The recorder reports its state more than once; only its start counts.
+  if (director.recording) return;
+  director.recording = true;
+  // No reload to wait for: the page is ready now.
+  if (!recordReload) directorPageReady();
+}
+
+// The page for the next animation has loaded: play it after its lead, unless
+// it's already started by itself (a path carrying on from the last page).
+function directorPageReady() {
+  const d = director;
+  if (!d || d.started || d.i >= d.plays.length) return;
+  const play = d.plays[d.i];
+  clearTimeout(d.timer);
+  d.timer = setTimeout(() => {
+    if (director !== d || d.started) return;
+    if (animationKey() !== play.key) return directorOpen(play);
+    playAnimation();
+    // Nothing started (no animation left on the page?): move on.
+    clearTimeout(d.watchdog);
+    d.watchdog = setTimeout(() => director === d && !d.started && directorNext(), 4000);
+  }, Math.max(PLAY_AFTER_LOAD, play.lead || 0));
+}
+
+function directorOpen(play) {
+  page.webContents.once('did-finish-load', () => directorPageReady());
+  page.webContents.loadURL(play.key);
+}
+
+// An animation (or path) started or stopped while re-recording.
+function directorPlayback(on) {
+  const d = director;
+  if (!d || !recordingActive) return;
+  if (on) {
+    if (d.started) return;
+    d.started = true;
+    clearTimeout(d.timer);
+    clearTimeout(d.watchdog);
+    return;
+  }
+  if (!d.started) return;
+  // A cued path hands over to the scroll animation and back: wait a moment
+  // to see whether anything carries on before counting it as finished.
+  clearTimeout(d.timer);
+  d.timer = setTimeout(() => {
+    if (director !== d || animPlaying || pathPlaying) return;
+    directorNext();
+  }, 120);
+}
+
+function directorNext() {
+  const d = director;
+  d.i++;
+  d.started = false;
+  if (d.i >= d.plays.length) {
+    d.timer = setTimeout(() => {
+      if (director !== d) return;
+      d.done = true;
+      toggleRecording();
+    }, d.tail);
+    return;
+  }
+  directorToast(`${d.i + 1} of ${d.plays.length}`);
+  const play = d.plays[d.i];
+  d.timer = setTimeout(() => {
+    if (director !== d || d.started) return;
+    // A click may have taken the page elsewhere; let it load first.
+    if (page.webContents.isLoading()) page.webContents.once('did-finish-load', () => directorPageReady());
+    else if (animationKey() !== play.key) directorOpen(play);
+    else directorPageReady();
+  }, play.gap || 0);
+}
+
+// Which page each animation in a take played, and those pages' tracks now.
+// Takes from before recordings noted the page are matched by what played.
+function playsFor(take) {
+  const spans = take.animSpans || [];
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const plays = spans.map((sp) => {
+    if (!sp.track) return { key: null };
+    let key = sp.track.key || null;
+    if (!key && sp.track.stops && sp.track.stops.length) key = Object.keys(store.animations).find((k) => same(trackFor(k).stops, sp.track.stops)) || null;
+    if (!key && sp.track.path) key = Object.keys(store.paths).find((k) => same(store.paths[k], sp.track.path)) || null;
+    return { key };
+  });
+  const plans = {};
+  for (const { key } of plays) if (key) plans[key] = { stops: trackFor(key).stops, path: pathFor(key) };
+  return { plays, plans };
+}
+
+ipcMain.on('edit:anim-set', (e, key, stops) => {
+  if (!editorFor(e.sender) || !key) return;
+  saveTrack(key, { stops: stops || [], cursor: trackFor(key).cursor }, e.sender);
+});
+ipcMain.on('edit:path-set', (e, key, saved) => {
+  if (!editorFor(e.sender) || !key || !saved) return;
+  store.paths[key] = saved;
+  save();
+  pathChanged(key, e.sender);
+});
+ipcMain.on('edit:path-delete', (e, key) => editorFor(e.sender) && key && deletePath(key));
+ipcMain.on('edit:rerecord', (e, plan) => editorFor(e.sender) && startRerecord(plan));
+
 // ---- Editor ----------------------------------------------------------------
 // Each recording opens in an editor window to preview it, trim it and tweak
 // the cursor before it's saved to the recordings folder. Saving re-encodes
@@ -1833,11 +2335,12 @@ function editorBounds() {
   return { x: Math.round(area.x + (area.width - width) / 2), y: Math.round(area.y + (area.height - height) / 2), width, height };
 }
 
-function openEditor(file) {
+// `carry`: edits a re-record brings over from the take it redoes (its cursor).
+function openEditor(file, carry) {
   for (const ed of editors.values()) {
     if (ed.file === file && !ed.win.isDestroyed()) return ed.win.focus();
   }
-  const ed = { file, dirty: isTake(file), saved: null, out: null };
+  const ed = { file, dirty: isTake(file), saved: null, out: null, carry };
   ed.win = new BrowserWindow({
     ...editorBounds(),
     minWidth: 760,
@@ -1927,12 +2430,14 @@ ipcMain.handle('edit:init', (e) => {
       samples.pts[i] = s.pts;
       samples.key[i] = s.key ? 1 : 0;
     });
+    if (take && !take.edits && ed.carry) take.edits = ed.carry;
     return {
       url: pathToFileURL(ed.file).href,
       name: path.basename(ed.file),
       output: path.basename(outputPath(ed)),
       isTake: isTake(ed.file),
       take,
+      plays: take ? playsFor(take) : null,
       index: { codec: index.codec, width: index.width, height: index.height, duration: index.duration, description: new Uint8Array(index.description), samples },
     };
   } catch (err) {
@@ -2006,6 +2511,7 @@ function savedOutput(ed, file) {
 }
 
 ipcMain.handle('edit:finish-output', (e, keep) => {
+  flushStore(); // the animation changes are kept with the page, on disk now
   const ed = editorFor(e.sender);
   if (!ed || !ed.out) return { error: 'Not saving' };
   const out = ed.out;
@@ -2029,6 +2535,7 @@ ipcMain.handle('edit:finish-output', (e, keep) => {
 // Nothing to draw and nothing trimmed: the take is saved as it is, a clone of
 // the file rather than a re-encode.
 ipcMain.handle('edit:copy', (e) => {
+  flushStore();
   const ed = editorFor(e.sender);
   if (!ed || ed.out) return { error: 'Already saving' };
   try {
@@ -2082,12 +2589,37 @@ function smokeTest(url) {
     const u = new URL(url);
     store.animations[u.origin + u.pathname] = JSON.parse(process.env.DARC_SMOKE_TRACK);
   }
+  // A cursor path for the page, as saved.
+  if (process.env.DARC_SMOKE_PATH) {
+    const u = new URL(url);
+    store.paths[u.origin + u.pathname] = JSON.parse(process.env.DARC_SMOKE_PATH);
+  }
   wc.once('did-finish-load', () => {
     hideOverlay();
     const size = (process.env.DARC_SMOKE_SIZE || '').match(/^(\d+)x(\d+)$/);
     if (size) setWindowSize(+size[1], +size[2], 'smoke');
     wc.loadURL(url);
     wc.once('did-finish-load', () => {
+      // DARC_SMOKE_TIMELINE_SHOT=<png>: screenshot the timeline (and the page and
+      // path view beside it, as -page.png and -path.png) after DARC_SMOKE_TIMELINE_JS.
+      if (process.env.DARC_SMOKE_TIMELINE_SHOT) {
+        toggleTimeline(false);
+        timeline.webContents.on('console-message', (e) => console.log(`[timeline] ${e.message}`));
+        pathView.webContents.on('console-message', (e) => console.log(`[path] ${e.message}`));
+        setTimeout(async () => {
+          if (process.env.DARC_SMOKE_TIMELINE_JS) {
+            await timeline.webContents.executeJavaScript(process.env.DARC_SMOKE_TIMELINE_JS, true).catch((e) => console.log('smoke timeline js', e.message));
+            await new Promise((r) => setTimeout(r, 500));
+          }
+          const out = process.env.DARC_SMOKE_TIMELINE_SHOT;
+          fs.writeFileSync(out, (await timeline.webContents.capturePage()).toPNG());
+          fs.writeFileSync(out.replace(/\.png$/, '-page.png'), (await page.webContents.capturePage()).toPNG());
+          if (pathMode) fs.writeFileSync(out.replace(/\.png$/, '-path.png'), (await pathView.webContents.capturePage()).toPNG());
+          console.log(JSON.stringify({ pathMode, scrollY: await pageScrollY() }));
+          app.exit(0);
+        }, 3000);
+        return;
+      }
       // DARC_SMOKE_ANIMATOR_SHOT=<png>: screenshot the animation panel instead of recording.
       if (process.env.DARC_SMOKE_ANIMATOR_SHOT) {
         toggleAnimator();

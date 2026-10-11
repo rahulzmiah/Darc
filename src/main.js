@@ -83,7 +83,7 @@ let animPlaying = false;
 let recordReload = null;
 let queuedPlay = false;
 const PLAY_AFTER_LOAD = 250; // ms after the reloaded page loads
-let markerPrompt = null; // { key } while the toast is asking to restart a timeline
+let markerPrompt = null; // { key, click } while the toast is asking to restart a timeline
 let markerVisitKey = null; // page whose saved timeline the user has already been asked about this visit
 let overlayMode = null;
 let scrollbarCssKey = null;
@@ -911,39 +911,54 @@ function pageScrollY() {
 // Record mode: scroll the page, then drop a marker at the current position —
 // same as clicking the preview in the animation panel. The first marker on a
 // visit to a page that already has a timeline asks whether to start over, so
-// re-recording doesn't pile new markers onto the old ones.
-async function setMarker() {
+// re-recording doesn't pile new markers onto the old ones. A click marker
+// (⇧⌘K) also clicks wherever the mouse is now, once playback reaches it.
+async function setMarker(withClick) {
   const key = animationKey();
   if (!key) return showToast('Open a page first · ⌘L');
+  const click = withClick === true ? mouseOverPage() : null;
+  if (withClick === true && !click) return showToast('Point at the page to set a click');
   const saved = trackFor(key).stops;
   if (markerPrompt) {
     // ⌘K again while asking means "keep it" — carry on adding markers.
     dismissToast();
   } else if (markerVisitKey !== key && saved.length) {
     markerVisitKey = key;
-    markerPrompt = { key };
+    markerPrompt = { key, click };
     return askToast(`Restart timeline? ${saved.length} marker${saved.length === 1 ? '' : 's'} saved`);
   }
   markerVisitKey = key;
-  addMarker(key, false);
+  addMarker(key, false, click);
 }
 
-async function addMarker(key, reset) {
+// Where the mouse is over the page, in the page view's coordinates, or null
+// when it's somewhere else.
+function mouseOverPage() {
+  const p = screen.getCursorScreenPoint();
+  const area = win.getContentBounds();
+  const { width, height } = page.getBounds();
+  const x = Math.round(p.x - area.x);
+  const y = Math.round(p.y - area.y);
+  return x >= 0 && y >= 0 && x < width && y < height ? { x, y } : null;
+}
+
+async function addMarker(key, reset, click) {
   const y = await pageScrollY();
   if (y == null) return;
   if (animator && !animator.isDestroyed()) {
     // The panel owns the stops while it's open; let it add the marker so its
     // pending edits aren't clobbered.
-    sendToAnimator('anim:add-stop', { key, y, reset });
+    sendToAnimator('anim:add-stop', { key, y, reset, click });
   } else {
     const track = trackFor(key);
     // Easing is shared across the track, so follow the existing lines.
     const easing = track.stops.length ? [...track.stops[0].easing] : [...DEFAULT_EASING];
     const stops = reset ? [] : track.stops;
-    stops.push({ y, duration: 1600, easing, hold: 600 });
+    stops.push({ y, duration: 1600, easing, hold: 600, ...(click && { click }) });
     saveTrack(key, { stops, cursor: reset ? [] : track.cursor });
   }
-  showToast(reset ? `Timeline restarted · ${y}px` : `Marker set · ${y}px`);
+  const what = click ? `Click marker set · ${y}px · ${click.x}, ${click.y}` : `Marker set · ${y}px`;
+  showToast(reset ? `Timeline restarted · ${what.replace(/^\w/, (c) => c.toLowerCase())}` : what);
 }
 
 function playAnimation() {
@@ -1041,7 +1056,8 @@ function buildMenu() {
       submenu: [
         { label: 'Animation Panel', accelerator: 'CmdOrCtrl+.', click: toggleAnimator },
         { type: 'separator' },
-        { label: 'Set Marker', accelerator: 'CmdOrCtrl+K', click: setMarker },
+        { label: 'Set Marker', accelerator: 'CmdOrCtrl+K', click: () => setMarker(false) },
+        { label: 'Set Click Marker', accelerator: 'Shift+CmdOrCtrl+K', click: () => setMarker(true) },
         { type: 'separator' },
         { label: 'Play', accelerator: 'CmdOrCtrl+Enter', click: playAnimation },
         { label: 'Stop', accelerator: 'Shift+CmdOrCtrl+.', click: stopAnimation },
@@ -1283,7 +1299,7 @@ ipcMain.on('toast:answer', (_e, ok) => {
   const prompt = markerPrompt;
   if (!prompt) return;
   dismissToast();
-  if (ok && prompt.key === animationKey()) addMarker(prompt.key, true);
+  if (ok && prompt.key === animationKey()) addMarker(prompt.key, true, prompt.click);
   win.focus();
   page.webContents.focus();
 });
@@ -1339,6 +1355,15 @@ function afterRecordReload() {
 }
 
 ipcMain.on('anim:progress', (_e, data) => animProgress(data));
+// Playback reached a click marker: click the page there for real, so the page
+// reacts as it would to the mouse and the recording draws the pointer and click.
+ipcMain.on('anim:click', (e, { x, y }) => {
+  const wc = page.webContents;
+  if (e.sender !== wc) return;
+  wc.sendInputEvent({ type: 'mouseMove', x, y });
+  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  setTimeout(() => !wc.isDestroyed() && wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 }), 80);
+});
 function animProgress(data) {
   sendToAnimator('anim:progress', data);
   // The recorder times the pointer's cursor spans off playback.

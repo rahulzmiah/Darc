@@ -32,6 +32,7 @@ gh release create v<version> dist/Darc-<version>.dmg --generate-notes
 | ⌥⌘E | Recording window |
 | ⌘↩ | Play the page's cursor path, or its scroll animation (Esc or scrolling stops it) |
 | ⌘K | Set a marker at the current scroll position |
+| ⇧⌘K | Set a click marker: a marker that also clicks wherever the mouse is when playback reaches it |
 | ⇧⌘E | Capture a cursor path / stop capturing |
 | ⌘P | Edit the page's cursor path |
 | [ / ] | Less / more cursor smoothing (with Live cursor on) |

@@ -508,7 +508,7 @@
         <div class="stop-head">
           <span class="grip" data-grip title="Drag to reorder">⋮⋮</span>
           <span class="badge">${i + 1}</span>
-          <span class="title">Scroll to</span>
+          <span class="title"${s.click ? ` title="Clicks at ${s.click.x}, ${s.click.y} once it gets here"` : ''}>${s.click ? 'Scroll, click' : 'Scroll to'}</span>
           <input class="num" style="width:72px" data-field="y" type="number" min="0" value="${s.y}" title="px from top">
           <button class="remove" data-remove="${i}" title="Delete">×</button>
         </div>
@@ -1139,7 +1139,7 @@
       stops = [];
       spans = [];
     }
-    stops.push(newStop(clampY(data.y)));
+    stops.push({ ...newStop(clampY(data.y)), ...(data.click && { click: data.click }) });
     commit();
     render();
     select(stops.length - 1, true);

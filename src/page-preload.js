@@ -280,7 +280,7 @@ function play(stops, cue) {
   stops.forEach((stop, i) => {
     const duration = Math.max(0, stop.duration);
     const from = i ? stops[i - 1].y : el.scrollTop;
-    segments.push({ start: t, end: t + duration, from, to: stop.y, ease: cubicBezier(...stop.easing), index: i });
+    segments.push({ start: t, end: t + duration, from, to: stop.y, ease: cubicBezier(...stop.easing), index: i, click: stop.click });
     t += duration;
     segments.push({ start: t, end: t + Math.max(0, stop.hold), from: stop.y, to: stop.y, ease: (p) => p, index: i });
     t += Math.max(0, stop.hold);
@@ -296,6 +296,13 @@ function play(stops, cue) {
     const y = Math.max(0, Math.min(maxScroll(el).y, seg.from + (seg.to - seg.from) * seg.ease(p)));
     el.scrollTo({ top: y, behavior: 'instant' });
     ipcRenderer.send('anim:progress', { playing: true, y, elapsed: Math.min(elapsed, t), total: t, index: seg.index });
+    // A click marker clicks as its move ends, before the hold.
+    for (const s of segments) {
+      if (s.click && !s.clicked && elapsed >= s.end) {
+        s.clicked = true;
+        ipcRenderer.send('anim:click', s.click);
+      }
+    }
     if (cued) {
       playback.cueAt = null;
       playback.paused = elapsed;

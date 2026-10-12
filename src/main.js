@@ -232,7 +232,10 @@ function toggleTimeline(preview) {
     save();
     dockRecorder();
   });
-  timeline.on('focus', () => raisePartner(animator));
+  timeline.on('focus', () => {
+    showBrowser();
+    raisePartner(animator);
+  });
   timeline.on('closed', () => {
     timeline = null;
     dockPath(false);
@@ -331,6 +334,7 @@ function openRecorder() {
   recorder.webContents.once('did-finish-load', () => {
     for (const fn of recorderQueue.splice(0)) fn();
   });
+  recorder.on('focus', showBrowser);
   recorder.on('close', (e) => {
     if (recordingActive) {
       e.preventDefault();
@@ -887,7 +891,10 @@ function toggleAnimator() {
     store.animatorWidth = animator.getBounds().width;
     save();
   });
-  animator.on('focus', () => raisePartner(timeline));
+  animator.on('focus', () => {
+    showBrowser();
+    raisePartner(timeline);
+  });
   animator.on('closed', () => {
     animator = null;
   });
@@ -1271,6 +1278,19 @@ function clearSiteData() {
 
 function buildMenu() {
   const nav = (fn) => () => fn(page.webContents.navigationHistory);
+  // Commands for the browser bring it back if the player is showing.
+  const browserSide = (items) =>
+    items.map((item) =>
+      item.click
+        ? {
+            ...item,
+            click: () => {
+              revealBrowser();
+              item.click();
+            },
+          }
+        : item,
+    );
   const template = [
     {
       label: app.name,
@@ -1287,7 +1307,7 @@ function buildMenu() {
     },
     {
       label: 'File',
-      submenu: [
+      submenu: browserSide([
         { label: 'Open Location…', accelerator: 'CmdOrCtrl+L', click: () => showOverlay('url') },
         { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => page.webContents.reload() },
         { label: 'Hard Reload', accelerator: 'Shift+CmdOrCtrl+R', click: () => page.webContents.reloadIgnoringCache() },
@@ -1296,12 +1316,12 @@ function buildMenu() {
         { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: nav((h) => h.canGoForward() && h.goForward()) },
         { type: 'separator' },
         { role: 'close' },
-      ],
+      ]),
     },
     { role: 'editMenu' },
     {
       label: 'View',
-      submenu: [
+      submenu: browserSide([
         { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => page.webContents.setZoomLevel(0) },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => page.webContents.setZoomLevel(page.webContents.getZoomLevel() + 0.5) },
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => page.webContents.setZoomLevel(page.webContents.getZoomLevel() - 0.5) },
@@ -1309,11 +1329,11 @@ function buildMenu() {
         { role: 'togglefullscreen' },
         { label: 'Developer Tools', accelerator: 'Alt+CmdOrCtrl+I', click: toggleDevTools },
         { label: 'Inspect Element', accelerator: 'Alt+CmdOrCtrl+C', click: inspectElement },
-      ],
+      ]),
     },
     {
       label: 'Animation',
-      submenu: [
+      submenu: browserSide([
         { label: 'Animation Panel', accelerator: 'CmdOrCtrl+.', click: toggleAnimator },
         { label: 'Timeline', accelerator: 'CmdOrCtrl+T', click: () => toggleTimeline(false) },
         { type: 'separator' },
@@ -1326,13 +1346,15 @@ function buildMenu() {
         { label: 'Capture Cursor Path / Stop', accelerator: 'Shift+CmdOrCtrl+E', click: togglePathCapture },
         { label: 'Edit Cursor Path', accelerator: 'CmdOrCtrl+P', click: editPath },
         { label: 'Delete Cursor Path', click: () => deletePath(animationKey()) },
-      ],
+      ]),
     },
     {
       label: 'Record',
       submenu: [
-        { label: 'Record / Stop', accelerator: 'CmdOrCtrl+E', click: toggleRecording },
-        { label: 'Recording Window', accelerator: 'Alt+CmdOrCtrl+E', click: toggleRecorder },
+        ...browserSide([
+          { label: 'Record / Stop', accelerator: 'CmdOrCtrl+E', click: toggleRecording },
+          { label: 'Recording Window', accelerator: 'Alt+CmdOrCtrl+E', click: toggleRecorder },
+        ]),
         { type: 'separator' },
         { label: 'Edit Last Recording', click: () => (lastTake && fs.existsSync(lastTake) ? openEditor(lastTake) : showToast('No recording to edit · ⌘E')) },
         { label: 'Open Recording…', accelerator: 'CmdOrCtrl+O', click: openRecordingDialog },
@@ -1348,24 +1370,26 @@ function buildMenu() {
     },
     {
       label: 'Data',
-      submenu: [
+      submenu: browserSide([
         { label: 'Clear Browsing Data…', accelerator: 'Shift+CmdOrCtrl+Backspace', click: clearBrowsingData },
         { label: 'Clear Darc Data for This Site…', click: clearSiteData },
-      ],
+      ]),
     },
     {
       label: 'Window',
       submenu: [
-        ...SIZE_PRESETS.flatMap(([width, height, ratio], i) => [
+        { label: 'Browser / Player', accelerator: 'CmdOrCtrl+B', click: toggleBrowserPlayer },
+        { type: 'separator' },
+        ...browserSide(SIZE_PRESETS.flatMap(([width, height, ratio], i) => [
           ...(i > 0 && SIZE_PRESETS[i - 1][2] !== ratio ? [{ type: 'separator' }] : []),
           {
             label: `${width} × ${height}  (${ratio})`,
             accelerator: `CmdOrCtrl+${i + 1}`,
             click: () => setWindowSize(width, height, ratio),
           },
-        ]),
+        ])),
         { type: 'separator' },
-        { label: 'Center', accelerator: 'Ctrl+CmdOrCtrl+C', click: () => win.center() },
+        ...browserSide([{ label: 'Center', accelerator: 'Ctrl+CmdOrCtrl+C', click: () => win.center() }]),
         { type: 'separator' },
         { role: 'minimize' },
       ],
@@ -1439,6 +1463,7 @@ function createWindow() {
     viewportTimer = setTimeout(() => sendToRecorder('rec:viewport', viewportPixels()), 150);
   });
   win.on('leave-full-screen', dockTimeline);
+  win.on('focus', showBrowser);
   win.on('close', (e) => {
     if (recordingActive) {
       // Finish writing the file first; the pane reports back and we close then.
@@ -2180,13 +2205,20 @@ function directorToast(text) {
 }
 
 function startRerecord(plan) {
-  if (recordingActive || director) return showToast('Already recording');
+  if (recordingActive || director) {
+    showToast('Already recording');
+    return false;
+  }
   const plays = (plan.plays || []).filter((p) => p.key);
-  if (!plays.length) return showToast('Nothing to re-record');
+  if (!plays.length) {
+    showToast('Nothing to re-record');
+    return false;
+  }
   director = { plays, i: 0, started: false, timer: 0, watchdog: 0, tail: Math.min(plan.tail || 1000, 3000), cursor: plan.cursor };
   stopAnimation();
   if (pathMode) closePathView();
   hideOverlay();
+  showBrowser();
   win.focus();
   const begin = () => {
     if (!director) return;
@@ -2198,6 +2230,7 @@ function startRerecord(plan) {
     page.webContents.once('did-finish-load', () => setTimeout(begin, 300));
     page.webContents.loadURL(plays[0].key);
   }
+  return true;
 }
 
 function endDirector() {
@@ -2316,7 +2349,54 @@ ipcMain.on('edit:path-set', (e, key, saved) => {
   pathChanged(key, e.sender);
 });
 ipcMain.on('edit:path-delete', (e, key) => editorFor(e.sender) && key && deletePath(key));
-ipcMain.on('edit:rerecord', (e, plan) => editorFor(e.sender) && startRerecord(plan));
+// The new take opens in a player of its own, so this one closes. Its take
+// stays in Unsaved if it has unsaved edits, to open again later.
+ipcMain.on('edit:rerecord', (e, plan) => {
+  const ed = editorFor(e.sender);
+  if (!ed || !startRerecord(plan)) return;
+  if (ed.dirty) ed.force = true;
+  ed.win.close();
+});
+
+// ---- Browser / player ------------------------------------------------------
+// One side is on screen at a time: the browser (the main window and its panes)
+// or the player (the editor windows). Focusing either side hides the other,
+// ⌘B switches between them, and closing the last player brings the browser back.
+let playerShown = false;
+const browserWindows = () => [win, timeline, animator, recorder].filter((w) => w && !w.isDestroyed());
+
+function showPlayer() {
+  if (playerShown || !editors.size) return;
+  playerShown = true;
+  for (const w of editorWindows()) if (!w.isDestroyed() && !w.isVisible()) w.showInactive();
+  // The page has to stay on screen while it's recorded, and a full-screen
+  // window can't simply be hidden.
+  if (recordingActive || director || win.isFullScreen()) return;
+  for (const w of browserWindows()) w.hide();
+}
+
+function showBrowser() {
+  if (!playerShown) return;
+  playerShown = false;
+  for (const w of browserWindows()) if (!w.isVisible()) w.showInactive();
+  for (const w of editorWindows()) if (!w.isDestroyed()) w.hide();
+}
+
+// Switch to the browser and focus it.
+function revealBrowser() {
+  if (!win || win.isDestroyed()) return;
+  const was = playerShown;
+  showBrowser();
+  if (was) win.focus();
+}
+
+function toggleBrowserPlayer() {
+  if (playerShown) return revealBrowser();
+  const last = editorWindows().filter((w) => !w.isDestroyed()).pop();
+  if (!last) return showToast('No recording open · ⌘O');
+  showPlayer();
+  last.focus();
+}
 
 // ---- Editor ----------------------------------------------------------------
 // Each recording opens in an editor window to preview it, trim it and tweak
@@ -2389,7 +2469,11 @@ function openEditor(file, carry) {
     ed.force = true;
     ed.win.close();
   });
-  ed.win.on('closed', () => editors.delete(id));
+  ed.win.on('focus', showPlayer);
+  ed.win.on('closed', () => {
+    editors.delete(id);
+    if (!editors.size) revealBrowser();
+  });
   if (process.env.DARC_SMOKE) smokeEditor(ed);
 }
 

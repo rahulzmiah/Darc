@@ -302,7 +302,7 @@
       if (!(except && except.kind === 'key' && except.i === i && except.which === 'arrive')) ts.push(ln.arrive);
       if (!(except && except.kind === 'key' && except.i === i && except.which === 'depart')) ts.push(ln.depart);
     });
-    if (L.path) {
+    if (L.path && !(except && except.kind === 'path')) {
       ts.push(L.path.start, L.path.body, L.path.end);
       L.path.tl.arrivals.forEach((a, j) => {
         if (!(except && except.kind === 'anchor' && except.i === j)) ts.push(L.path.body + a);
@@ -434,13 +434,6 @@
       ctx.lineWidth = 1.5;
       ctx.strokeStyle = '#8cc4ff';
       ctx.stroke();
-    }
-    if (L.pathOnly && stops.length) {
-      ctx.fillStyle = '#666';
-      ctx.font = '11px -apple-system, sans-serif';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText('Lines skipped: the path starts right away · drag it onto a line', w - 8, r.y + r.h - 4);
     }
     // Keyframes: each line's arrival and departure.
     L.lines.forEach((ln, i) => {
@@ -582,12 +575,12 @@
   function renderLabels() {
     const lines = stops.length ? `${stops.length} line${stops.length === 1 ? '' : 's'}` : 'No lines';
     ROWS.scroll.el.querySelector('small').textContent = lines;
-    ROWS.path.el.querySelector('small').textContent = !path ? 'None' : L.pathOnly ? 'Right away' : `At line ${path.startAfter + 1}`;
+    ROWS.path.el.querySelector('small').textContent = !path ? 'None' : L.overlay ? `From ${fmt(L.path.start)} s` : 'Plays alone';
     ROWS.cursor.el.querySelector('small').textContent = spans.length ? `${spans.length} span${spans.length === 1 ? '' : 's'}` : 'Always';
   }
 
   // ---- Inspector -----------------------------------------------------------
-  const num = (f, value, { step = 0.05, min = 0, disabled = false, unit = 's' } = {}) => `<div class="row"><label>${{ y: 'Y', duration: 'Move', hold: 'Hold', move: 'Move', pause: 'Pause', sstart: 'From', send: 'To' }[f]}</label>
+  const num = (f, value, { step = 0.05, min = 0, disabled = false, unit = 's' } = {}) => `<div class="row"><label>${{ y: 'Y', duration: 'Move', hold: 'Hold', move: 'Move', pause: 'Pause', sstart: 'From', send: 'To', pstart: 'Starts at' }[f]}</label>
     <input class="num" data-f="${f}" type="number" step="${step}" min="${min}" value="${value}"${disabled ? ' disabled' : ''}><span class="unit">${unit}</span></div>`;
 
   function renderInspector() {
@@ -598,7 +591,7 @@
       inspector.innerHTML = `<h3>Timeline</h3><div class="keys">
         <b>Drag</b> a keyframe to retime it<br>
         <b>⇧-drag</b> pushes everything after<br>
-        <b>Drag</b> the path onto a line's arrival<br>
+        <b>Drag</b> the path to when it starts<br>
         <b>Drag</b> in Cursor for when it shows<br>
         <b>Space</b> preview · <b>←/→</b> frame<br>
         <b>J / K</b> previous / next keyframe<br>
@@ -631,9 +624,8 @@
     } else if (sel.kind === 'path') {
       const b = L.path;
       inspector.innerHTML = `<h3>Cursor path<span>${b ? `${fmt(b.end - b.body)} s` : ''}</span></h3>
-        <div class="row"><label>Starts</label><select class="sel" data-f="start"><option value="">Right away</option>${stops.map((s, i) => `<option value="${i}"${path.startAfter === i ? ' selected' : ''}>At line ${i + 1} · ${s.y}px</option>`).join('')}</select></div>
-        ${TrackModel.cueOf(stops, path) != null ? `<div class="row"><label>Delay</label><input class="num" data-f="pdelay" type="number" step="0.05" min="0" value="${+(TrackModel.cueDelay(stops, path) / 1000).toFixed(2)}" title="How far into the line's hold it starts"><span class="unit">s</span></div>` : ''}
-        <p class="note">At a line, it plays as the move there ends, and the line's hold carries on from wherever it leaves the page. Its points are edited on the page while the playhead is in it.</p>`;
+        ${stops.length ? num('pstart', +((b ? b.body : 0) / 1000).toFixed(2)) : ''}
+        <p class="note">${stops.length ? 'It plays over the lines, which keep scrolling, and clicks whatever is under the pointer then. ' : 'With no lines, it plays alone, scrolling as it was captured. '}Its points are edited on the page while the playhead is in it.</p>`;
     } else if (sel.kind === 'span') {
       const sp = spans[sel.i];
       inspector.innerHTML = `<h3>Cursor shown</h3>
@@ -686,16 +678,11 @@
         }
       }
       changed({ path: true });
-    } else if (sel.kind === 'path' && f === 'pdelay') {
+    } else if (sel.kind === 'path' && f === 'pstart') {
       if (Number.isNaN(v)) return;
-      record('pdelay');
-      const ms = Math.round(Math.max(0, v) * 1000);
-      if (ms) path.startDelay = ms;
-      else delete path.startDelay;
+      record('pstart');
+      path.startAt = Math.round(Math.max(0, v) * 1000);
       changed({ path: true });
-    } else if (sel.kind === 'path' && f === 'start') {
-      e.target.blur();
-      setPathStart(e.target.value === '' ? null : +e.target.value);
     } else if (sel.kind === 'span') {
       if (Number.isNaN(v)) return;
       record(`${f}:s${sel.i}`);
@@ -730,15 +717,6 @@
     record();
     for (const s of stops) s.easing = [...stops[i].easing];
     changed({ track: true });
-  }
-
-  // When the path plays: right away (null) or at line i.
-  function setPathStart(i) {
-    record();
-    if (i == null) delete path.startAfter;
-    else path.startAfter = i;
-    delete path.startDelay;
-    changed({ path: true });
   }
 
   // A click at a path point, as the ⌘P editor sets one.
@@ -912,17 +890,9 @@
     if (sel.kind === 'line') {
       record();
       const i = sel.i;
-      stops = TrackModel.removeLines(stops, new Set([i]));
-      // Keep the path on the same line.
-      let pathEdit = false;
-      if (path && path.startAfter != null && path.startAfter >= i) {
-        if (path.startAfter > i) path.startAfter--;
-        else if (i > 0) path.startAfter = i - 1;
-        else if (!stops.length) delete path.startAfter;
-        pathEdit = true;
-      }
+      stops = TrackModel.removeLines(stops, new Set([i])); // the path keeps its time
       sel = stops.length ? { kind: 'line', i: Math.min(i, stops.length - 1) } : null;
-      changed({ track: true, path: pathEdit });
+      changed({ track: true });
     } else if (sel.kind === 'span') {
       record();
       spans.splice(sel.i, 1);
@@ -1001,11 +971,21 @@
     }
     if (row === 'path' && L.path) {
       let best = null;
+      // Clicks sit low in the block, under the points.
+      const r = ROWS.path, cy = r.y + 3 + (r.h - 6) - 5;
+      if (Math.abs(y - cy) <= 6) {
+        for (const e of L.path.tl.events) {
+          const dx = Math.abs(X(L.path.body + e.T) - x);
+          if (e.type === 'down' && dx <= 5 && (!best || dx < best.d)) best = { kind: 'click', i: e.anchor, T: e.T, d: dx };
+        }
+        if (best) return best;
+      }
       L.path.tl.arrivals.forEach((a, j) => {
         const dx = Math.abs(X(L.path.body + a) - x);
         if (dx <= 5 && (!best || dx < best.d)) best = { kind: 'anchor', i: j, d: dx };
       });
       if (best) return best;
+      if (Math.abs(X(L.path.end) - x) <= 4) return { kind: 'pend' };
       if (t >= L.path.start && t <= L.path.end) return { kind: 'path' };
       return { kind: 'empty' };
     }
@@ -1048,13 +1028,7 @@
       ];
     }
     if (h.kind === 'path') {
-      return [{
-        label: 'Starts',
-        submenu: [
-          { id: 'start:', label: 'Right away', checked: path.startAfter == null },
-          ...stops.map((s, i) => ({ id: `start:${i}`, label: `At line ${i + 1}`, checked: path.startAfter === i })),
-        ],
-      }, { type: 'separator' }, { id: 'delete', label: 'Delete path', accelerator: 'Backspace' }];
+      return [{ id: 'smooth', label: 'Smooth into one movement' }, { type: 'separator' }, { id: 'delete', label: 'Delete path', accelerator: 'Backspace' }];
     }
     if (h.kind === 'span') return [{ id: 'delete', label: 'Delete span', accelerator: 'Backspace' }];
     return [
@@ -1075,7 +1049,11 @@
     else if (id === 'click') toggleClick(h.i);
     else if (id === 'ease-all') easeAll(h.i);
     else if (id.startsWith('ease:')) setEasing(h.i, EASINGS[+id.slice(5)][1]);
-    else if (id.startsWith('start:')) setPathStart(id === 'start:' ? null : +id.slice(6));
+    else if (id === 'smooth') {
+      record();
+      path = CursorPath.smooth(path);
+      changed({ path: true });
+    }
     else if (id === 'preview') {
       scrubTo(t);
       startPreview();
@@ -1118,6 +1096,13 @@
       select({ kind: 'anchor', i: h.i });
       scrubTo(L.path.body + L.path.tl.arrivals[h.i]);
       drag = h.i > 0 ? { kind: 'anchor', i: h.i, origin: L.path.body + L.path.tl.arrivals[h.i], x0: x, base, moved: false } : { kind: 'scrub' };
+    } else if (h.kind === 'click') {
+      select({ kind: 'anchor', i: h.i });
+      scrubTo(L.path.body + h.T);
+      drag = { kind: 'click', i: h.i, origin: L.path.body + h.T, x0: x, base, moved: false };
+    } else if (h.kind === 'pend') {
+      select({ kind: 'path' });
+      drag = { kind: 'pend', origin: L.path.end, x0: x, base, moved: false };
     } else if (h.kind === 'path') {
       select({ kind: 'path' });
       scrubTo(t);
@@ -1189,7 +1174,7 @@
       if (e.target !== canvas) return;
       const { x, y } = pos(e);
       const h = hit(x, y);
-      canvas.style.cursor = h.kind === 'key' || h.kind === 'anchor' ? 'ew-resize'
+      canvas.style.cursor = h.kind === 'key' || h.kind === 'anchor' || h.kind === 'click' || h.kind === 'pend' ? 'ew-resize'
         : h.kind === 'span' ? (h.mode === 'move' ? 'grab' : 'ew-resize')
           : h.kind === 'path' || h.kind === 'line' ? 'grab'
             : h.kind === 'cursor' ? 'crosshair' : 'default';
@@ -1225,9 +1210,20 @@
       const target = snap(drag.origin + (t - T(drag.x0)), { kind: 'anchor', i: drag.i });
       path = retimeAnchor(drag.base.path, drag.i, target - drag.origin, e.shiftKey);
       changed();
+    } else if (drag.kind === 'click') {
+      // Earlier or later in its point's rest.
+      const target = snap(drag.origin + (t - T(drag.x0)), null);
+      path = CursorPath.moveClicks(drag.base.path, drag.i, target - drag.origin);
+      changed();
+    } else if (drag.kind === 'pend') {
+      // The rest after the last point: shorter (not before its last click
+      // lets go) or longer.
+      const target = snap(drag.origin + (t - T(drag.x0)), { kind: 'path' });
+      path = CursorPath.setTail(drag.base.path, CursorPath.tail(drag.base.path) + target - drag.origin);
+      changed();
     } else if (drag.kind === 'path') {
-      // Anywhere in a line's hold, or right away.
-      drag.target = TrackModel.pathSlot(stops, t - drag.grab, (SNAP_PX / W()) * view.span);
+      // Any moment over the lines; with none, it plays alone from the top.
+      drag.target = stops.length ? { t: Math.max(0, snap(t - drag.grab, { kind: 'path' }, false)) } : null;
       draw();
     } else if (drag.kind === 'span') {
       const sp = spans[drag.i];
@@ -1264,19 +1260,13 @@
     if (d.kind === 'key' || d.kind === 'block') {
       pushSnapshot(d.base.snap);
       changed({ track: true });
-    } else if (d.kind === 'anchor') {
+    } else if (d.kind === 'anchor' || d.kind === 'click' || d.kind === 'pend') {
       pushSnapshot(d.base.snap);
       changed({ path: true });
     } else if (d.kind === 'path') {
-      const cue = d.target ? d.target.cue : null;
-      const now = TrackModel.cueOf(stops, path);
-      const delay = cue == null ? 0 : d.target.delay;
-      if (d.target && (cue !== now || delay !== TrackModel.cueDelay(stops, path))) {
+      if (d.target && Math.round(d.target.t) !== L.path.start) {
         pushSnapshot(d.base.snap);
-        if (cue == null) delete path.startAfter;
-        else path.startAfter = cue;
-        if (delay) path.startDelay = delay;
-        else delete path.startDelay;
+        path.startAt = Math.round(d.target.t);
         changed({ path: true });
       } else draw();
     } else if (d.kind === 'span') {

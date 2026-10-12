@@ -37,6 +37,7 @@
   .btn.record.on { background: #ff4d2e; color: #fff; }
   .seg.path { background: rgba(245, 185, 66, 0.3); border-left: 1px solid #f5b942; color: #ffe2a8; font-size: 10px; font-weight: 600; line-height: 20px; padding-left: 4px; overflow: hidden; cursor: default; }
   .seg.lead { background: rgba(245, 185, 66, 0.12); cursor: default; }
+  .seg.over { top: auto; height: 5px; padding: 0; border-left: 0; background: #f5b942; pointer-events: none; }
   #close { color: #555; font-size: 18px; line-height: 1; padding: 0 2px 0 6px; }
   #close:hover { color: #fff; }
   html { border: 1px solid #2a2a2a; }
@@ -780,6 +781,13 @@
   // Each line's move and hold, and the cursor path where it plays.
   const segments = () => layoutNow().segs;
 
+  // A path over the lines: a bar along the bottom of them.
+  function overPath() {
+    const b = layoutNow().path;
+    if (!b || !b.overlay) return '';
+    return `<div class="seg path over" style="left:${tlX(b.start)}px;width:${Math.max(3, tlX(b.end) - tlX(b.start))}px"></div>`;
+  }
+
   // Where the page is scrolled to at time t.
   function yAt(t) {
     const y = layoutNow().yAt(t);
@@ -806,7 +814,7 @@
       }
       const title = sg.kind === 'move' ? `Line ${sg.i + 1} · ${secs(stops[sg.i].duration)}` : `Hold · ${secs(stops[sg.i].hold)}`;
       return `<div class="seg ${sg.kind}${sg.i === selected ? ' selected' : ''}" data-index="${sg.i}" style="left:${tlX(sg.start)}px;width:${w}px" title="${title}">${sg.kind === 'move' && w > 14 ? sg.i + 1 : ''}</div>`;
-    }).join('');
+    }).join('') + overPath();
     tlCursor.innerHTML = spans.map((sp, j) => {
       const w = Math.max(3, tlX(sp.end) - tlX(sp.start));
       return `<div class="span${j === selSpan ? ' selected' : ''}" data-span="${j}" style="left:${tlX(sp.start)}px;width:${w}px" title="Cursor shown ${fmtT(sp.start)} – ${fmtT(sp.end)}"><span class="x" data-remove-span="${j}" title="Remove">×</span></div>`;

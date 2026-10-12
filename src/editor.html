@@ -132,6 +132,10 @@
   .pblock { position: absolute; top: 4px; bottom: 4px; background: rgba(245, 185, 66, 0.24); border: 1px solid #f5b942; color: #ffe2a8; font-size: 10px; font-weight: 600; padding: 2px 0 0 4px; overflow: hidden; cursor: grab; }
   .pblock .lead { position: absolute; left: 0; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, rgba(245, 185, 66, 0.22) 0 3px, transparent 3px 7px); }
   .pblock.sel { background: rgba(245, 185, 66, 0.42); border-color: #fff; }
+  .pblock .pedge { position: absolute; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 1; }
+  .pblock .pedge.start { left: 0; }
+  .pblock .pedge.end { right: 0; }
+  .pblock .pedge:hover, body.dragging .pblock.sel .pedge { background: rgba(255, 255, 255, 0.35); }
   .key { position: absolute; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; transform: rotate(45deg); background: #4da3ff; border: 1px solid #0b0b0b; cursor: ew-resize; z-index: 2; }
   .key.depart { background: #0b0b0b; border-color: #4da3ff; width: 8px; height: 8px; margin: -4px 0 0 -4px; }
   .key.sel { background: #fff; border-color: #0b0b0b; }
@@ -863,6 +867,7 @@
   const PATH_EASES = [['recorded', 'As recorded'], ['ease', 'Ease in-out'], ['out', 'Ease out'], ['linear', 'Linear']];
   const MIN_MOVE = 50; // ms
   const MIN_PATH_MOVE = 30; // ms
+  const MIN_PATH_SCALE = 0.05; // the quickest a path's moves play, against how they were recorded
   const copyJ = (o) => JSON.parse(JSON.stringify(o));
   const sameJ = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const sameCurve = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
@@ -1118,7 +1123,7 @@
         const b = L.path;
         const w = Math.max(4, x(b.end) - x(b.start));
         const lead = Math.max(0, x(b.body) - x(b.start));
-        pathHtml += `<div class="pblock${isSel('path') ? ' sel' : ''}" data-kind="path" data-p="${p}" style="left:${x(b.start)}px;width:${w}px" title="Cursor path · ${pageName(pl.key)}"><div class="lead" style="width:${lead}px"></div><span style="position:relative;margin-left:${lead}px">${w - lead > 34 ? 'Path' : ''}</span></div>`;
+        pathHtml += `<div class="pblock${isSel('path') ? ' sel' : ''}" data-kind="path" data-p="${p}" style="left:${x(b.start)}px;width:${w}px" title="Cursor path · ${pageName(pl.key)}"><div class="lead" style="width:${lead}px"></div><span style="position:relative;margin-left:${lead}px">${w - lead > 34 ? 'Path' : ''}</span><div class="pedge start" data-kind="pedge" data-which="start" data-p="${p}" title="Drag to start sooner or later; the end stays put"></div><div class="pedge end" data-kind="pedge" data-which="end" data-p="${p}" title="Drag to end sooner or later"></div></div>`;
         b.tl.arrivals.forEach((a, j) => {
           if (!shown(b.body + a)) return;
           const target = animDrag && animDrag.type === 'click' && animDrag.p === p && animDrag.target === j;
@@ -1167,9 +1172,12 @@
         + field('hold', 'Hold', s.hold / 1000, 's', { disabled: fixed })
         + `<div class="field"><label>Ease</label><select data-af="preset"${fixed ? ' disabled' : ''}>${EASINGS.map(([n], j) => `<option value="${j}"${j === preset ? ' selected' : ''}>${n}</option>`).join('')}<option value="custom"${preset < 0 ? ' selected' : ''}>Custom</option></select></div>`;
     } else if (animSel.kind === 'path') {
+      const b = layoutOf(animSel.p).path;
       body.innerHTML = head('Cursor path')
-        + `<div class="field"><label>Starts</label><select data-af="start"${fixed ? ' disabled' : ''}><option value="">Right away</option>${plan.stops.map((s, i) => `<option value="${i}"${plan.path.startAfter === i ? ' selected' : ''}>At line ${i + 1} · ${s.y}px</option>`).join('')}</select></div>`
-        + (TrackModel.cueOf(plan.stops, plan.path) != null ? field('pdelay', 'Delay', +(TrackModel.cueDelay(plan.stops, plan.path) / 1000).toFixed(2), 's', { disabled: fixed }) : '');
+        + (plan.stops.length ? field('pstart', 'Starts at', +(b.body / 1000).toFixed(2), 's', { disabled: fixed }) : '')
+        + field('pdur', 'Duration', +(b.tl.end / 1000).toFixed(2), 's', { disabled: fixed })
+        + `<div class="field"><label>Motion</label><div class="row"><button class="btn sm" data-aact="smooth"${fixed ? ' disabled' : ''} title="Glide through every point that doesn't click or pause, easing in at the start and out at the end">Smooth</button></div></div>`
+        + (plan.stops.length ? '<p class="note">The path plays over the lines, which keep scrolling: it clicks whatever is under the pointer at that moment.</p>' : '');
     } else {
       const path = plan.path;
       const a = path && path.anchors[animSel.i];
@@ -1249,8 +1257,7 @@
     return st;
   }
 
-  // Deletes what's selected: lines (keeping the path on the line it started
-  // at, or the one before), the whole path, or a path point.
+  // Deletes what's selected: lines, the whole path, or a path point.
   function deleteAnimSelection() {
     if (!animSel) return false;
     const key = plays[animSel.p] && plays[animSel.p].key;
@@ -1265,17 +1272,8 @@
     } else {
       for (const [k, { lines }] of selectedLines()) {
         const plan = plans[k];
-        const stops = TrackModel.removeLines(plan.stops, lines);
-        let path = plan.path;
-        if (path && path.startAfter != null) {
-          path = copyJ(path);
-          const was = path.startAfter;
-          const gone = [...lines].filter((i) => i <= was).length;
-          if (lines.has(was)) path.startAfter = was - gone >= 0 ? was - gone : null;
-          else path.startAfter = was - gone;
-          if (path.startAfter == null || !stops.length) delete path.startAfter;
-        }
-        setPlan(k, { stops, path }, true);
+        // The lines after keep their time, and so does the path.
+        setPlan(k, { stops: TrackModel.removeLines(plan.stops, lines) }, true);
       }
     }
     selectAnim(null);
@@ -1292,7 +1290,8 @@
   // A change saves the page's track or path straight away; undo covers it.
   function setPlan(key, next, save) {
     const before = plans[key];
-    plans[key] = { stops: next.stops || before.stops, path: next.path === undefined ? before.path : next.path };
+    // A path put back from an old recording waited at a line; it starts at a time now.
+    plans[key] = TrackModel.modernize(next.stops || before.stops, next.path === undefined ? before.path : next.path);
     if (save) {
       if (!sameJ(before.stops, plans[key].stops)) narc.animSet(key, plans[key].stops);
       if (plans[key].path && !sameJ(before.path, plans[key].path)) narc.pathSet(key, plans[key].path);
@@ -1328,16 +1327,13 @@
       if (f === 'y') s.y = Math.max(0, Math.round(v));
       else s[f] = Math.round(Math.max(f === 'duration' ? 0.05 : 0, v) * 1000);
       animEdit(`anim:${f}:${animSel.i}`, key, { stops });
-    } else if (animSel.kind === 'path' && f === 'pdelay') {
+    } else if (animSel.kind === 'path' && f === 'pstart') {
       if (Number.isNaN(v)) return;
-      const path = copyJ(plan.path);
-      const ms = Math.round(Math.max(0, v) * 1000);
-      if (ms) path.startDelay = ms;
-      else delete path.startDelay;
-      animEdit('anim:pdelay', key, { path });
-    } else if (animSel.kind === 'path' && f === 'start') {
-      e.target.blur();
-      setPathStart(animSel.p, e.target.value === '' ? null : +e.target.value);
+      animEdit('anim:pstart', key, { path: { ...plan.path, startAt: Math.round(Math.max(0, v) * 1000) } });
+    } else if (animSel.kind === 'path' && f === 'pdur') {
+      if (Number.isNaN(v)) return;
+      const ms = Math.max(CursorPath.minLength(plan.path, MIN_PATH_SCALE), v * 1000);
+      animEdit('anim:pdur', key, { path: CursorPath.stretch(plan.path, ms, MIN_PATH_SCALE) });
     } else if (animSel.kind === 'point') {
       const path = copyJ(plan.path);
       const a = path.anchors[animSel.i];
@@ -1365,9 +1361,10 @@
 
   $('anim-body').addEventListener('click', (e) => {
     const act = e.target.closest('[data-aact]');
-    if (!act || !animSel || animSel.kind !== 'point') return;
+    if (!act || !animSel) return;
     act.blur();
-    toggleClick(animSel.p, animSel.i);
+    if (act.dataset.aact === 'smooth' && animSel.kind === 'path') smoothPath(animSel.p);
+    else if (act.dataset.aact === 'click' && animSel.kind === 'point') toggleClick(animSel.p, animSel.i);
   });
 
   function setLineEasing(p, i, easing) {
@@ -1377,14 +1374,27 @@
     animEdit(`anim:preset:${i}`, key, { stops });
   }
 
-  // When play p's path starts: right away (null) or at line i.
-  function setPathStart(p, i) {
+  // Where a path dragged to start at `want` ms starts: any moment from the
+  // top, snapping to the lines' arrivals and departures within a few px.
+  function pathStartAt(stops, want) {
+    const snapMs = (6 / trackWidth()) * tlDur() * 1000;
+    let best = Math.max(0, want);
+    let d = snapMs;
+    for (const ln of TrackModel.layout(stops, null).lines) {
+      for (const k of [ln.arrive, ln.depart]) {
+        if (Math.abs(k - want) < d) {
+          d = Math.abs(k - want);
+          best = k;
+        }
+      }
+    }
+    return Math.round(best);
+  }
+
+  // The whole path as one gliding movement (CursorPath.smooth).
+  function smoothPath(p) {
     const key = plays[p].key;
-    const path = copyJ(plans[key].path);
-    if (i == null) delete path.startAfter;
-    else path.startAfter = i;
-    delete path.startDelay;
-    animEdit(null, key, { path });
+    animEdit(null, key, { path: CursorPath.smooth(plans[key].path) });
   }
 
   function toggleClick(p, i) {
@@ -1500,6 +1510,9 @@
       selectAnim({ p, kind: 'path' });
       scrubTo(e.clientX);
       animDrag = { type: 'pblock', p, x0: e.clientX, grab: tlT(e.clientX) - at(p, L.path.start), base: { ...base, shift: plays[p].shift || 0 }, moved: false, editable: !!key };
+    } else if (kind === 'pedge') {
+      selectAnim({ p, kind: 'path' });
+      animDrag = { type: 'pedge', which: el.dataset.which, p, x0: e.clientX, base: { ...base, shift: plays[p].shift || 0 }, moved: false, editable: !!key };
     } else if (kind === 'point') {
       selectAnim({ p, kind: 'point', i });
       const t = at(p, L.path.body + L.path.tl.arrivals[i]);
@@ -1543,16 +1556,35 @@
         renderAnim();
         return;
       }
-      // Anywhere in a line's hold (snapping to its arrival), or right away.
+      // Any moment, over the lines (snapping to their keyframes).
       const want = (tlT(e.clientX) - d.grab - playStart(d.p)) * 1000;
-      const snapMs = (6 / trackWidth()) * tlDur() * 1000;
-      const best = TrackModel.pathSlot(plan.stops, want, snapMs);
-      const path = copyJ(plan.path);
-      if (best.cue == null) delete path.startAfter;
-      else path.startAfter = best.cue;
-      if (best.cue != null && best.delay) path.startDelay = best.delay;
-      else delete path.startDelay;
+      const path = { ...plan.path, startAt: pathStartAt(plan.stops, want) };
       if (!sameJ(path, plans[key].path)) setPlan(key, { path });
+      return;
+    }
+    if (d.type === 'pedge') {
+      // An edge: the path stretches or shrinks to start or end there, and
+      // the other end stays put. The start goes where the block itself can.
+      const plan = d.base.plan;
+      const L0 = TrackModel.layout(plan.stops, plan.path);
+      const len0 = L0.path.end - L0.path.body;
+      let path = copyJ(plan.path);
+      // Ending sooner first cuts the rest after the last point (to its last
+      // click), then quickens the moves.
+      if (d.which === 'end' && ms < 0) path = CursorPath.setTail(path, CursorPath.tail(path) + ms);
+      const minLen = CursorPath.minLength(path, MIN_PATH_SCALE);
+      let len = len0 + ms;
+      if (d.which === 'start' && !plan.stops.length) {
+        plays[d.p].shift = Math.max(-plays[d.p].start, d.base.shift + Math.min(ms, len0 - minLen) / 1000);
+        len = len0 - (plays[d.p].shift - d.base.shift) * 1000;
+        changesChanged();
+      } else if (d.which === 'start') {
+        path.startAt = Math.min(pathStartAt(plan.stops, L0.path.start + ms), Math.round(L0.path.end - minLen));
+        len = L0.path.end - path.startAt;
+      }
+      path = CursorPath.stretch(path, Math.max(minLen, len), MIN_PATH_SCALE);
+      if (!sameJ(path, plans[key].path)) setPlan(key, { path });
+      else renderAnim();
       return;
     }
     if (d.type === 'key') {
@@ -1616,6 +1648,7 @@
       return;
     }
     pushSnapshot(d.base.snap);
+    if (d.type === 'pedge' && (plays[d.p].shift || 0) !== d.base.shift) persistShifts();
     // Save what the drag left.
     const now = plans[key];
     plans[key] = d.base.plan;
@@ -2274,7 +2307,7 @@
   // edits as the Animation section, the buttons and the keys.
   function contextTarget(el) {
     const a = el.closest('#tl-scroll [data-kind], #tl-path [data-kind]');
-    if (a) return { kind: a.dataset.kind === 'key' ? 'line' : a.dataset.kind, p: +a.dataset.p, i: a.dataset.i == null ? null : +a.dataset.i };
+    if (a) return { kind: a.dataset.kind === 'key' ? 'line' : a.dataset.kind === 'pedge' ? 'path' : a.dataset.kind, p: +a.dataset.p, i: a.dataset.i == null ? null : +a.dataset.i };
     const seam = !previewOn() && el.closest('#tl-video .seam');
     if (seam) return { kind: 'seam', i: +seam.dataset.cut };
     const span = el.closest('#tl-cursor .span');
@@ -2315,14 +2348,7 @@
     }
     if (h.kind === 'path') {
       return [
-        {
-          label: 'Starts',
-          enabled: !fixed,
-          submenu: [
-            { id: 'start:', label: 'Right away', checked: plan.path.startAfter == null },
-            ...plan.stops.map((_, i) => ({ id: `start:${i}`, label: `At line ${i + 1}`, checked: plan.path.startAfter === i })),
-          ],
-        },
+        { id: 'smooth', label: 'Smooth into one movement', enabled: !fixed },
         { type: 'separator' },
         { id: 'delete-path', label: 'Delete path', accelerator: 'Backspace', enabled: !fixed },
         { type: 'separator' },
@@ -2364,8 +2390,8 @@
     else if (!plays[h.p] || !plays[h.p].key) {
       // Only looked at.
     } else if (id.startsWith('ease:')) setLineEasing(h.p, h.i, EASINGS[+id.slice(5)][1]);
-    else if (id.startsWith('start:')) setPathStart(h.p, id === 'start:' ? null : +id.slice(6));
     else if (id === 'click') toggleClick(h.p, h.i);
+    else if (id === 'smooth') smoothPath(h.p);
     else if (id === 'delete-point') removePoint(h.p, h.i);
     else if (id === 'delete-lines' || id === 'delete-path') deleteAnimSelection();
   }

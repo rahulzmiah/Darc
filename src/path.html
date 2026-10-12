@@ -43,7 +43,9 @@
   #inspect input:disabled, #inspect select:disabled { opacity: 0.35; }
   .sep { width: 1px; height: 20px; background: #2a2a2a; }
   #startwrap { display: flex; align-items: center; gap: 6px; color: #888; white-space: nowrap; }
-  #start { padding: 3px 4px; background: #0b0b0b; border: 1px solid #2a2a2a; color: #ddd; font: inherit; outline: 0; }
+  #startwrap[hidden] { display: none; }
+  #start { width: 52px; padding: 3px 4px; background: #0b0b0b; border: 1px solid #2a2a2a; color: #ddd; font: inherit; outline: 0; }
+  #start:focus { border-color: #4da3ff; }
   #start:focus { border-color: #4da3ff; }
   #delete.armed { color: #ff8a8a; border-color: #ff8a8a; }
   #hint { color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -68,14 +70,16 @@
       <option value="linear">Linear</option>
     </select>
   </span>
+  <button class="btn" id="smooth" title="Make the path one smooth movement: it glides through every point that doesn't click or pause">Smooth</button>
   <span class="sep"></span>
-  <label id="startwrap" title="When the path plays: as soon as play is pressed, or once the scroll animation reaches one of its lines (⌘.), which then waits for it">Starts <select id="start"></select></label>
+  <label id="startwrap" title="When the path starts, on the scroll animation's clock (⌘.). It plays over the lines, which keep scrolling, and clicks whatever is under the pointer">Starts at <input id="start" type="number" min="0" step="0.1"> s</label>
   <button class="btn" id="delete" title="Delete this page's cursor path">Delete</button>
   <button class="btn" id="done" title="Close (Esc)">Done</button>
 </div>
 <script src="cursor-shapes.js"></script>
 <script src="cursor-layer.js"></script>
 <script src="cursor-path.js"></script>
+<script src="track-model.js"></script>
 <script>
   // The cursor path over the page. Editing, it draws the path for dragging its
   // points and handles, and scrubbing puts the page's scroll and the pointer
@@ -100,6 +104,8 @@
   let key = null;
   let path = null;
   let tl = null;
+  let stops = []; // the page's scroll lines, which the path plays over
+  let L = null; // the two on one clock (track-model.js)
   let playhead = 0;
   let selected = null; // anchor index
   let drag = null;
@@ -130,6 +136,7 @@
 
   function rebuild() {
     tl = CursorPath.timeline(path);
+    L = TrackModel.layout(stops, path);
     playhead = Math.min(playhead, tl.end);
   }
 
@@ -151,19 +158,22 @@
     narc.scroll(y);
   }
 
-  // Put the page and the pointer where they were at played time t.
-  function apply(t) {
+  // Put the page and the pointer where they were at played time t. Over the
+  // lines, they have the scroll: where they put it then (or `y`, from the
+  // timeline), and nothing while playing, as the page's animation runs it.
+  function apply(t, y) {
     const s = tl.at(t);
-    sendScroll(s.sy);
+    if (!L.overlay) sendScroll(s.sy);
+    else if (mode !== 'play') sendScroll(y != null ? y : L.yAt(L.path.body + t));
     sendMove(s.x, s.y);
     if (layer) layer.moveTo(s.x * dpr, s.y * dpr, true);
     return s;
   }
 
   // `external`: the timeline moved the playhead, so don't tell it back.
-  function seek(t, external) {
+  function seek(t, external, y) {
     playhead = Math.max(0, Math.min(tl.end, t));
-    apply(playhead);
+    apply(playhead, y);
     if (mode === 'dock' && !external) narc.dockSeek(playhead);
     wake();
   }
@@ -182,7 +192,7 @@
     if (!tl.end) return;
     if (from >= tl.end - 1) from = 0;
     if (layer) layer.pressLatch = false;
-    const lead = from === 0 ? leadIn(scrollY) : null;
+    const lead = from === 0 && !L.overlay ? leadIn(scrollY) : null;
     play = { start: performance.now() - from + (lead ? lead.len : 0), lead, next: tl.events.findIndex((e) => e.T >= from), held: new Set() };
     if (play.next < 0) play.next = tl.events.length;
     if (mode === 'edit') mode = 'preview';
@@ -571,30 +581,16 @@
     document.body.classList.toggle('top', low > path.anchors.length / 2);
   }
 
-  // The scroll animation's lines, for starting the path at one of them.
-  let lines = [];
+  // When the path starts over the scroll animation's lines (with none, it
+  // plays alone).
   function renderStart() {
-    const sel = $('start');
-    const at = path.startAfter;
-    sel.innerHTML = '';
-    const opt = (value, text) => {
-      const o = document.createElement('option');
-      o.value = value;
-      o.textContent = text;
-      sel.appendChild(o);
-    };
-    opt('', 'Right away');
-    lines.forEach((y, i) => opt(String(i), `At line ${i + 1} · ${Math.round(y)} px`));
-    if (at != null && at >= lines.length) opt(String(at), `At line ${at + 1} (gone)`);
-    sel.value = at == null ? '' : String(at);
+    $('startwrap').hidden = !stops.length;
+    if (document.activeElement !== $('start')) $('start').value = +((path.startAt || 0) / 1000).toFixed(2);
   }
   $('start').addEventListener('change', () => {
     const next = copy(path);
-    const v = $('start').value;
-    if (v === '') delete next.startAfter;
-    else next.startAfter = +v;
+    next.startAt = Math.round(Math.max(0, +$('start').value || 0) * 1000);
     commit(next);
-    $('start').blur();
   });
 
   $('play').addEventListener('click', () => (play ? stopPlay(false) : startPlay(playhead)));
@@ -630,6 +626,10 @@
     next.segments[selected].scale = Math.max(0.05, Math.round(((+$('move').value || 0) * 1000 / recorded) * 1000) / 1000);
     commit(next);
   });
+  $('smooth').addEventListener('click', () => {
+    $('smooth').blur();
+    if (path) commit(CursorPath.smooth(path));
+  });
   $('ease').addEventListener('change', () => {
     if (selected == null || !path.segments[selected]) return;
     const next = copy(path);
@@ -637,7 +637,7 @@
     commit(next);
     $('ease').blur();
   });
-  for (const id of ['pause', 'move']) {
+  for (const id of ['pause', 'move', 'start']) {
     $(id).addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === 'Escape') $(id).blur();
       e.stopPropagation();
@@ -752,6 +752,7 @@
     }
     key = data.key;
     path = data.path;
+    stops = data.stops || [];
     undo = [];
     redo = [];
     selected = null;
@@ -762,7 +763,6 @@
     else layer.configure(data.cursor);
     fit();
     placeBar();
-    lines = data.lines || [];
     renderStart();
     if (mode === 'play') {
       startPlay(0, data.from);
@@ -781,6 +781,7 @@
     mode = 'dock';
     key = data.key;
     path = data.path;
+    stops = data.stops || [];
     undo = [];
     redo = [];
     if (selected != null && selected >= path.anchors.length) selected = null;
@@ -804,7 +805,7 @@
       sendScroll(d.scrollY);
       apply0();
       wake();
-    } else seek(d.t, true);
+    } else seek(d.t, true, d.y);
   });
   narc.onUpdate((next) => {
     if (!next || mode !== 'dock') return;

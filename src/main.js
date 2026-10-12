@@ -82,6 +82,27 @@ if (!store.pathStartsInferred) {
   store.pathStartsInferred = true;
 }
 
+// Paths then waited at their line, the scroll paused while they played. Now
+// they start at a time and play over the lines; convert them once, keeping
+// when everything plays.
+if (!store.pathsStartAt) {
+  for (const [key, saved] of Object.entries(store.paths || {})) {
+    const t = store.animations[key];
+    const stops = Array.isArray(t) ? t : (t && t.stops) || [];
+    const next = TrackModel.modernize(stops, saved);
+    store.paths[key] = next.path;
+    if (next.stops !== stops) store.animations[key] = Array.isArray(t) ? next.stops : { ...t, stops: next.stops };
+  }
+  store.pathsStartAt = true;
+}
+
+// Paths used to keep the hand's wait before it first moved, so they began
+// with the pointer sitting still. Drop it from saved paths, once.
+if (!store.pathsTrimmed) {
+  for (const [key, saved] of Object.entries(store.paths || {})) store.paths[key] = CursorPath.trimRest(saved);
+  store.pathsTrimmed = true;
+}
+
 let saveTimer;
 function save() {
   clearTimeout(saveTimer);
@@ -272,7 +293,7 @@ function dockPath(on) {
   syncLiveCursor();
   page.webContents.send('path:active', true);
   pathView.setVisible(true);
-  sendToPathView('path:dock', { key, path: saved, cursor: { ...cursorPayload(), smoothing: 0 }, spans: trackFor(key).cursor });
+  sendToPathView('path:dock', { key, path: saved, stops: trackFor(key).stops, cursor: { ...cursorPayload(), smoothing: 0 }, spans: trackFor(key).cursor });
 }
 
 // Put the page where the animation is at time t: the scroll, and inside the
@@ -1172,18 +1193,19 @@ function playAnimation() {
     queuedPlay = true;
     return;
   }
-  const { stops } = trackFor(animationKey());
-  // A cursor path plays straight away, or once the scroll animation reaches its line.
-  const cursorPath = pathFor(animationKey());
-  const cue = cursorPath && cursorPath.startAfter != null && cursorPath.startAfter < stops.length ? cursorPath.startAfter : null;
-  if (cursorPath && cue == null) return openPathView('play');
+  const key = animationKey();
+  const { stops } = trackFor(key);
+  // With no lines, a cursor path plays alone, scrolling as it was captured.
+  // Otherwise it plays over the lines from its start (anim:cue).
+  if (pathFor(key) && !stops.length) return openPathView('play');
   if (!stops.length) return showToast('No animation for this page · ⌘.');
   if (pathMode) closePathView();
   hideOverlay();
   win.focus();
   page.webContents.focus();
-  pathCued = null;
-  page.webContents.send('anim:play', stops, cue, cue == null ? 0 : cursorPath.startDelay || 0);
+  pathCued = false;
+  const L = layoutFor(key);
+  page.webContents.send('anim:play', stops, L.path ? L.path.start : null, L.total);
 }
 
 // DevTools get a window of their own: the live cursor view sits over the page
@@ -1626,12 +1648,7 @@ ipcMain.on('tl:resize', (_e, height) => {
   dockRecorder();
 });
 // Undoing a deletion brings a path back, so it needn't exist yet.
-ipcMain.on('tl:path-set', (e, key, saved) => {
-  if (!key || !saved) return;
-  store.paths[key] = saved;
-  save();
-  pathChanged(key, e.sender);
-});
+ipcMain.on('tl:path-set', (e, key, saved) => key && saved && putPath(key, saved, e.sender));
 ipcMain.on('tl:path-delete', (_e, key) => key && deletePath(key));
 ipcMain.on('tl:select-anchor', (_e, i) => pathMode === 'dock' && sendToPathView('path:select', i));
 // From the path view while docked: the timeline keeps the playhead and the keys.
@@ -1810,9 +1827,9 @@ let pathPlaying = false;
 let pathPlayKey = null; // page whose path is playing
 let pathEnded = 0; // when a played path last finished, to carry on after a click that navigates
 let pathChainPending = false;
-// The path playing was started by the scroll animation reaching its line:
-// { at, start, index }, the animation's elapsed time then, and when.
-let pathCued = null;
+// The path playing was started by the scroll animation, which it plays over
+// and whose clock times them both.
+let pathCued = false;
 let pathScrollY = 0; // where the playing path last put the page
 const PATH_CHAIN_WINDOW = 2000; // ms after a path ends that a navigation still carries on
 const PATH_CAPTURE_TAIL = 150; // ms to wait for the last click after the page starts to change
@@ -1871,8 +1888,10 @@ function finishPathCapture(navigated) {
   const fitted = CursorPath.fit(cap);
   const clicks = fitted ? fitted.anchors.filter((a) => a.buttons.some((b) => b.type === 'down')).length : 0;
   if (!fitted || (fitted.anchors.length < 2 && !clicks)) return showToast('No cursor movement captured');
-  const start = inferPathStart(fitted, trackFor(cap.key).stops, true);
-  if (start != null) fitted.startAfter = start;
+  // It plays over the lines from the one it was captured at.
+  const { stops } = trackFor(cap.key);
+  const start = inferPathStart(fitted, stops, true);
+  if (stops.length) fitted.startAt = start == null ? 0 : Math.round(TrackModel.layout(stops, null).lines[start].arrive);
   store.paths[cap.key] = fitted;
   save();
   pathChanged(cap.key);
@@ -1885,8 +1904,10 @@ async function openPathView(mode) {
   const key = animationKey();
   const saved = pathFor(key);
   if (!saved) return showToast('No cursor path for this page · ⇧⌘E');
-  // Where the page is now: a path starting elsewhere glides there first.
-  const from = mode === 'play' ? await pageScrollY() : null;
+  // Where the page is now: a path starting elsewhere glides there first,
+  // unless the lines have the scroll.
+  const overlay = mode === 'play' && pathCued;
+  const from = mode === 'play' && !overlay ? await pageScrollY() : null;
   if (key !== animationKey()) return;
   if (pathCapture) finishPathCapture(false);
   if (overlayMode) hideOverlay();
@@ -1902,8 +1923,7 @@ async function openPathView(mode) {
   const now = viewportSize();
   const v = saved.viewport;
   if (v && (v.width !== now.width || v.height !== now.height)) showToast(`Path captured at ${v.width} × ${v.height} · now ${now.width} × ${now.height}`);
-  const lines = trackFor(key).stops.map((s) => s.y);
-  const send = () => sendToPathView('path:open', { mode, key, path: saved, from, lines, cursor: { ...cursorPayload(), smoothing: 0 } });
+  const send = () => sendToPathView('path:open', { mode, key, path: saved, from, stops: trackFor(key).stops, cursor: { ...cursorPayload(), smoothing: 0 } });
   if (pathView.webContents.isLoading()) pathView.webContents.once('did-finish-load', send);
   else send();
 }
@@ -1946,14 +1966,11 @@ function stopAnimation() {
 function pathProgress(data) {
   const anim = { playing: !!data.playing, elapsed: data.elapsed || 0 };
   if (pathCued) {
-    // Part of the scroll animation, which waits for it and carries on after,
-    // its clock running on through the path.
-    const took = Date.now() - pathCued.start;
-    if (anim.playing) return animProgress({ playing: true, y: pathScrollY, elapsed: pathCued.at + took, index: pathCued.index });
-    pathCued = null;
+    // Part of the scroll animation, which reports the progress of both.
+    if (anim.playing) return;
+    pathCued = false;
     if (data.finished && pathMode === 'play') pathEnded = Date.now();
-    if (data.finished) page.webContents.send('anim:resume', took);
-    else page.webContents.send('anim:stop');
+    if (!data.finished) page.webContents.send('anim:stop');
     return;
   }
   // The recorder times cursor spans off it, like the scroll animation.
@@ -1977,7 +1994,7 @@ function endCaptureForNavigation() {
 // its way off the page carries on into the next page's.
 function pathPageChanging() {
   endCaptureForNavigation();
-  pathCued = null; // the animation waiting on it goes with the page
+  pathCued = false; // the animation it played over goes with the page
   if (pathMode === 'play') {
     pathChainPending = !recordReload;
     sendToPathView('path:stop');
@@ -1990,7 +2007,7 @@ function pathPageChanging() {
 
 function playChainedPath(delay) {
   setTimeout(() => {
-    if (!pathMode && !pathCapture && pathFor(animationKey())) openPathView('play');
+    if (!pathMode && !pathCapture && pathFor(animationKey())) playAnimation();
   }, delay);
 }
 
@@ -2014,10 +2031,10 @@ function pathPageChanged() {
   dockPath(false);
 }
 
-// The scroll animation reached the path's line and is waiting for it.
-ipcMain.on('anim:cue', (e, at) => {
+// The scroll animation reached the moment the path starts.
+ipcMain.on('anim:cue', (e) => {
   if (e.sender !== page.webContents) return;
-  pathCued = { at: (at && at.elapsed) || 0, index: at ? at.index : 0, start: Date.now() };
+  pathCued = true;
   dockPath(false);
   openPathView('play');
 });
@@ -2036,12 +2053,18 @@ ipcMain.on('path:scroll', (e, y) => {
   if (pathMode && e.sender === pathView.webContents) page.webContents.send('path:scroll', y);
 });
 ipcMain.on('path:progress', (e, data) => e.sender === pathView.webContents && pathProgress(data));
-ipcMain.on('path:set', (e, key, saved) => {
-  if (e.sender !== pathView.webContents || !key || !saved) return;
-  store.paths[key] = saved;
+ipcMain.on('path:set', (e, key, saved) => e.sender === pathView.webContents && key && saved && putPath(key, saved, e.sender));
+
+// Saves a page's path. One that waits at a line (an old recording's, put
+// back) starts at a time instead, and every window is told, the sender too.
+function putPath(key, saved, from) {
+  const { stops, cursor } = trackFor(key);
+  const next = TrackModel.modernize(stops, saved);
+  store.paths[key] = next.path;
   save();
-  pathChanged(key, e.sender);
-});
+  if (next.stops !== stops) saveTrack(key, { stops: next.stops, cursor });
+  pathChanged(key, next.path === saved ? from : null);
+}
 ipcMain.on('path:delete', (e, key) => e.sender === pathView.webContents && deletePath(key));
 ipcMain.on('path:close', (e) => e.sender === pathView.webContents && closePathView());
 
@@ -2342,12 +2365,7 @@ ipcMain.on('edit:anim-set', (e, key, stops) => {
   if (!editorFor(e.sender) || !key) return;
   saveTrack(key, { stops: stops || [], cursor: trackFor(key).cursor }, e.sender);
 });
-ipcMain.on('edit:path-set', (e, key, saved) => {
-  if (!editorFor(e.sender) || !key || !saved) return;
-  store.paths[key] = saved;
-  save();
-  pathChanged(key, e.sender);
-});
+ipcMain.on('edit:path-set', (e, key, saved) => editorFor(e.sender) && key && saved && putPath(key, saved, e.sender));
 ipcMain.on('edit:path-delete', (e, key) => editorFor(e.sender) && key && deletePath(key));
 // The new take opens in a player of its own, so this one closes. Its take
 // stays in Unsaved if it has unsaved edits, to open again later.

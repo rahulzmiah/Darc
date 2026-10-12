@@ -1,10 +1,14 @@
 // A page's animation laid out on one clock: the scroll track's moves and holds
-// (⌘.), and the cursor path (⌘P) where it plays. A path that starts at line N
-// plays as the move to that line ends, or path.startDelay ms into its hold
-// (no further than the hold goes): the page glides to where the path
-// begins, the path plays (its own scroll and all), then the line's hold and
-// the next move carry on from wherever the path left the page. A path that
-// starts right away plays alone, after gliding from the top.
+// (⌘.), and the cursor path (⌘P) where it plays. On a page with lines, the
+// path starts path.startAt ms in and plays over them, like a hand on the
+// mouse while the page scrolls: the lines keep the scroll, and the path moves
+// the pointer and clicks whatever is under it. With no lines, the path plays
+// alone, scrolling as it was captured, after gliding from the top.
+//
+// Paths saved before that waited at a line instead (path.startAfter, and
+// path.startDelay ms into its hold), the scroll paused while they played
+// with their own. Old recordings are laid out as they played; modernize()
+// converts a path to start at a time.
 //
 // Playback (page-preload.js and path.html) runs the same steps; this is what
 // the panel and the timeline draw and scrub, and what cursor spans are timed
@@ -60,14 +64,19 @@
 
   const linear = (p) => p;
 
+  // Whether the path plays over the lines, from path.startAt.
+  const overlays = (stops, path) => !!path && path.startAt != null && stops.length > 0;
+
   // segs: [{ kind: 'move' | 'hold' | 'lead' | 'path', i, start, end, from, to, ease }]
   // i is the line for moves and holds. lines[i]: { start, arrive, depart } of
-  // each line's move and hold. path: { start, body, end, tl, cue } or null.
+  // each line's move and hold. path: { start, body, end, tl, cue, overlay }
+  // or null; a path over the lines has no segs of its own.
   function layout(stops, path, { startY = 0 } = {}) {
     const segs = [];
     const lines = [];
     const tl = path && path.anchors && path.anchors.length && CursorPath ? CursorPath.timeline(path) : null;
-    const cue = tl ? cueOf(stops, path) : null;
+    const overlay = !!tl && overlays(stops, path);
+    const cue = tl && !overlay ? cueOf(stops, path) : null;
     let t = 0;
     let at = startY;
     let block = null;
@@ -85,7 +94,7 @@
       block = { start, body, end: t, tl, cue };
     }
 
-    if (tl && cue == null) {
+    if (tl && cue == null && !overlay) {
       addPath();
     } else {
       stops.forEach((s, i) => {
@@ -110,7 +119,11 @@
         lines.push(line);
       });
     }
-    const total = t;
+    if (overlay) {
+      const start = Math.max(0, Math.round(path.startAt));
+      block = { start, body: start, end: start + tl.end, tl, cue: null, overlay: true };
+    }
+    const total = Math.max(t, block ? block.end : 0);
 
     function segAt(time) {
       return segs.find((s) => time < s.end) || segs[segs.length - 1] || null;
@@ -126,31 +139,32 @@
     }
 
     // The path at time t: its own played time, plus the page's scroll while
-    // it glides into place first. Null outside the path.
+    // it glides into place first (scrollY), or over the lines, where the
+    // lines have it (y). Null outside the path.
     function pathAt(time) {
       if (!block || time < block.start || time > block.end || (time === block.end && block.end < total)) return null;
+      if (overlay) return { t: Math.min(tl.end, time - block.body), y: yAt(time) };
       if (time < block.body) return { t: 0, scrollY: yAt(time) };
       return { t: Math.min(tl.end, time - block.body) };
     }
 
-    return { total, segs, lines, path: block, pathOnly: !!block && cue == null, yAt, pathAt, segAt };
+    return { total, segs, lines, path: block, pathOnly: !!block && cue == null && !overlay, overlay, yAt, pathAt, segAt };
   }
 
-  // Where a path dragged to start at time `want` (ms) can start: right away,
-  // or anywhere from a line's arrival to the end of its hold. Within `snap`
-  // ms of an arrival it starts right on it. { cue, delay, t }
-  function pathSlot(stops, want, snap = 0) {
-    const bare = layout(stops, null);
-    let best = { cue: null, delay: 0, t: 0, d: Math.abs(want) };
-    bare.lines.forEach((ln, i) => {
-      const hold = Math.max(0, stops[i].hold);
-      let delay = Math.max(0, Math.min(hold, want - ln.arrive));
-      if (delay < snap) delay = 0;
-      const t = ln.arrive + delay;
-      const d = Math.abs(want - t);
-      if (d < best.d) best = { cue: i, delay: Math.round(delay), t, d };
-    });
-    return best;
+  // A path that waited at a line (or started right away, skipping the
+  // lines) made to start at a time instead, playing over the lines. Its
+  // line's hold grows by however long it paused things, so everything after
+  // keeps its time. { stops, path }, as they were when there's nothing to do.
+  function modernize(stops, path) {
+    if (!path || path.startAt != null || !stops.length) return { stops, path };
+    const L = layout(stops, path);
+    const next = { ...path };
+    delete next.startAfter;
+    delete next.startDelay;
+    if (!L.path || L.path.cue == null) return { stops, path: { ...next, startAt: 0 } };
+    const out = stops.map((s) => ({ ...s }));
+    out[L.path.cue].hold = Math.round(Math.max(0, out[L.path.cue].hold) + (L.path.end - L.path.start));
+    return { stops: out, path: { ...next, startAt: Math.round(L.path.body) } };
   }
 
   // The stops without the lines in `gone` (a Set of indices). Each removed
@@ -170,7 +184,7 @@
     return out;
   }
 
-  const api = { layout, cubicBezier, cueOf, cueDelay, leadLen, pathSlot, removeLines };
+  const api = { layout, cubicBezier, cueOf, cueDelay, leadLen, modernize, overlays, removeLines };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.TrackModel = api;
 })(typeof self !== 'undefined' ? self : this);

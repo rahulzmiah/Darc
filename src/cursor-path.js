@@ -421,14 +421,14 @@
       an.hout = { x: round(an.hout.x), y: round(an.hout.y) };
     }
     const scroll = simplifyTrack(samples.map((s) => [Math.round(s.t), round(s.sy)]), 0.5);
-    return {
+    return trimRest({
       version: 1,
       viewport: capture.viewport,
       duration: Math.round(samples[n - 1].t),
       anchors,
       segments,
       scroll,
-    };
+    });
   }
 
   // ---- Playback ---------------------------------------------------------------
@@ -602,7 +602,12 @@
   }
 
   // Drop an anchor; its neighbours join up with their own handles. The moves
-  // either side, and its dwell, become one move over the same recorded time.
+  // either side, and its dwell, become one move over the same recorded time,
+  // so the scroll and everything after keep their time, but the pointer no
+  // longer stops where it was: between two points it has to stop at anyway
+  // (the ends, clicks, pauses) it glides from one to the other; otherwise it
+  // keeps the recorded pace either side, without the rest. Two moves with the
+  // same ease keep it.
   function removeAnchor(path, i) {
     if (i <= 0 || i >= path.anchors.length - 1) return path;
     const out = clone(path);
@@ -614,21 +619,197 @@
     const D = d1 + dw + d2;
     const f1 = segmentEase(s1), f2 = segmentEase(s2);
     const L = L1 + L2;
-    const profile = L > 1e-9 && D > 0
-      ? buildProfile((q) => {
-        const t = q * D;
-        if (t < d1) return (f1(d1 > 0 ? t / d1 : 1) * L1) / L;
-        if (t < d1 + dw) return L1 / L;
-        return (L1 + f2(d2 > 0 ? (t - d1 - dw) / d2 : 1) * L2) / L;
-      })
-      : null;
+    const stop = (j) => j === 0 || j === out.anchors.length - 1 || out.anchors[j].pause > 0 || (out.anchors[j].buttons || []).length > 0;
+    const same = s1.ease === s2.ease && s1.ease !== 'recorded';
+    let ease = same ? s1.ease : 'recorded';
+    let profile = null;
+    if (!same && L > 1e-9 && D > 0) {
+      if (stop(i - 1) && stop(i + 1)) profile = buildProfile(glide);
+      else {
+        const run = d1 + d2;
+        profile = run > 0
+          ? buildProfile((q) => {
+            const t = q * run;
+            if (t < d1) return (f1(d1 > 0 ? t / d1 : 1) * L1) / L;
+            return (L1 + f2(d2 > 0 ? (t - d1) / d2 : 1) * L2) / L;
+          })
+          : null;
+      }
+    }
+    if (!same && !profile) ease = 'linear';
     const scale = D > 0 ? (d1 * (s1.scale || 1) + dw + d2 * (s2.scale || 1)) / D : 1;
     out.anchors.splice(i, 1);
-    out.segments.splice(i - 1, 2, { profile, ease: 'recorded', scale: Math.round(scale * 1000) / 1000 });
+    out.segments.splice(i - 1, 2, { profile, ease, scale: Math.round(scale * 1000) / 1000 });
     return out;
   }
 
-  const api = { fit, timeline, insertAnchor, removeAnchor, cubicOf, bez, EASES };
+  // The path without the rest at either end: the hand sitting still before
+  // it first moves, and after its last move (or its last click there). The
+  // clock (and the scroll on it) starts at the first move.
+  function trimRest(path) {
+    const A = path.anchors;
+    if (!A || A.length < 2) return path;
+    const first = A[0], last = A[A.length - 1];
+    const lead = (first.buttons || []).length ? 0 : first.dwell;
+    const lastUp = Math.max(0, ...(last.buttons || []).map((b) => b.at + 250));
+    const tail = (last.buttons || []).length ? Math.max(0, last.dwell - lastUp) : last.dwell;
+    if (!lead && !tail) return path;
+    const out = clone(path);
+    const round = (v) => Math.round(v * 100) / 100;
+    out.anchors.forEach((a, i) => i && (a.t = round(a.t - lead)));
+    out.anchors[0].dwell -= lead;
+    out.anchors[out.anchors.length - 1].dwell -= tail;
+    out.scroll = (out.scroll || []).map(([t, y]) => [Math.round(t - lead), y]).filter(([t]) => t >= 0);
+    if (out.scroll.length && out.scroll[0][0] > 0) out.scroll.unshift([0, scrollAt(path, lead)]);
+    out.duration = Math.round(Math.max(0, path.duration - lead - tail));
+    return out;
+  }
+
+  // A button's played ms after its point is arrived at.
+  const pressAt = (b) => b.at + (b.wait || 0);
+
+  // The rest after the last point: its dwell and pause, in played ms.
+  function tail(path) {
+    const a = path.anchors[path.anchors.length - 1];
+    return a.dwell + a.pause;
+  }
+
+  // The shortest that rest can be: until its last click lets go.
+  function tailMin(path) {
+    const bs = path.anchors[path.anchors.length - 1].buttons || [];
+    return bs.length ? Math.max(...bs.map(pressAt)) + 80 : 0;
+  }
+
+  // The rest after the last point made ms long. Shorter cuts the added pause,
+  // then the recorded rest; longer adds pause. Its clicks keep their moment.
+  function setTail(path, ms) {
+    const out = clone(path);
+    const a = out.anchors[out.anchors.length - 1];
+    ms = Math.round(Math.max(tailMin(path), ms));
+    if (ms >= a.dwell) a.pause = ms - a.dwell;
+    else {
+      a.pause = 0;
+      a.dwell = ms;
+      out.duration = Math.round(Math.min(out.duration, a.t + ms));
+    }
+    for (const b of a.buttons || []) {
+      const off = pressAt(b);
+      b.at = Math.min(off, a.dwell);
+      b.wait = Math.round(off - b.at);
+    }
+    return out;
+  }
+
+  // Point i's clicks moved by d played ms, kept within its rest (dwell, then
+  // pause) and keeping their spacing.
+  function moveClicks(path, i, d) {
+    const out = clone(path);
+    const a = out.anchors[i];
+    const bs = a.buttons || [];
+    if (!bs.length) return out;
+    const offs = bs.map(pressAt);
+    d = Math.min(d, a.dwell + a.pause - Math.max(...offs));
+    d = Math.max(d, -Math.min(...offs));
+    bs.forEach((b, k) => {
+      const off = Math.round(offs[k] + d);
+      b.at = Math.min(off, a.dwell);
+      b.wait = off - b.at;
+    });
+    return out;
+  }
+
+  // Recorded time at played time T (the start of a pause for any moment in it).
+  function recordedAt(tl, T) {
+    for (const p of tl.pieces) {
+      if (T <= p.start + p.len) return p.len > 0 ? lerp(p.r0, p.r1, clamp01((T - p.start) / p.len)) : p.r0;
+    }
+    const last = tl.pieces[tl.pieces.length - 1];
+    return last ? last.r1 : 0;
+  }
+
+  // Minimum jerk: how a hand eases into and out of a reach.
+  const glide = (k) => k * k * k * (10 + k * (6 * k - 15));
+
+  // One unbroken movement: the pointer eases out of each point it has to stop
+  // at (the first, the last, clicks and pauses) and sweeps through every
+  // point between without slowing, its handles lined up so the curve has no
+  // corners. A wait before the first move goes too. Each stretch keeps its
+  // played length, so the path takes as long as before and the scroll stays
+  // in step, spread evenly over the stretch.
+  function smooth(path) {
+    const out = clone(path);
+    const A = out.anchors;
+    if (A.length < 2) return out;
+    const tl = timeline(path);
+    const clicks = (a) => (a.buttons || []).length > 0;
+    const stop = (i) => i === 0 || i === A.length - 1 || A[i].pause > 0 || clicks(A[i]);
+    for (let j = 1; j < A.length - 1; j++) {
+      if (stop(j)) continue;
+      const a = A[j];
+      let dir = norm(sub(a.hout, a.hin));
+      if (!len(dir)) dir = norm(sub(A[j + 1], A[j - 1]));
+      const lin = len(a.hin) || dist(a, A[j - 1]) / 3;
+      const lout = len(a.hout) || dist(a, A[j + 1]) / 3;
+      a.hin = mul(dir, -lin);
+      a.hout = mul(dir, lout);
+    }
+    const round = (v) => Math.round(v * 100) / 100;
+    for (const an of A) {
+      an.hin = { x: round(an.hin.x), y: round(an.hin.y) };
+      an.hout = { x: round(an.hout.x), y: round(an.hout.y) };
+    }
+    let a = 0;
+    for (let b = 1; b < A.length; b++) {
+      if (!stop(b)) continue;
+      const fold = a === 0 && !clicks(A[0]) ? A[0].dwell : 0;
+      const keep = A[a].dwell - fold;
+      const P = tl.arrivals[b] - (tl.arrivals[a] + A[a].dwell + A[a].pause) + fold;
+      const R0 = A[a].t + keep, R = A[b].t - R0;
+      const lens = [];
+      for (let k = a; k < b; k++) lens.push(lengthTable(cubicOf(out, k)).total);
+      const L = lens.reduce((s, v) => s + v, 0);
+      if (P > 0 && R > 0 && L > 1e-6) {
+        A[a].dwell = keep;
+        const F = [0];
+        for (const l of lens) F.push(F[F.length - 1] + l / L);
+        F[F.length - 1] = 1;
+        const K = F.map((f, m) => (m === 0 ? 0 : m === F.length - 1 ? 1 : invertEase(glide, f)));
+        for (let m = 1; m < b - a; m++) {
+          A[a + m].t = round(R0 + K[m] * R);
+          A[a + m].dwell = 0;
+        }
+        const scale = Math.round((P / R) * 1000) / 1000;
+        for (let m = 0; m < b - a; m++) {
+          const df = F[m + 1] - F[m];
+          const profile = buildProfile((q) => (df > 1e-9 ? (glide(lerp(K[m], K[m + 1], q)) - F[m]) / df : q));
+          out.segments[a + m] = { ...out.segments[a + m], profile, ease: 'recorded', scale };
+        }
+      }
+      a = b;
+    }
+    return out;
+  }
+
+  // The path played over about `ms`: its moves stretch or shrink together,
+  // keeping their proportions, while rests, pauses and clicks keep their time.
+  // No move gets quicker than minScale times its recorded speed.
+  function stretch(path, ms, minScale = 0.05) {
+    const tl = timeline(path);
+    const moves = tl.pieces.reduce((s, p) => s + (p.kind === 'move' ? p.len : 0), 0);
+    if (moves <= 0) return path;
+    const kMin = Math.max(0, ...path.segments.map((seg) => minScale / (seg.scale || 1)));
+    const k = Math.max(kMin, Math.max(0, ms - (tl.end - moves)) / moves);
+    const out = clone(path);
+    for (const seg of out.segments) seg.scale = Math.round((seg.scale || 1) * k * 1000) / 1000;
+    return out;
+  }
+
+  // The shortest the path can play in (as stretch allows).
+  function minLength(path, minScale = 0.05) {
+    return timeline(stretch(path, 0, minScale)).end;
+  }
+
+  const api = { fit, timeline, insertAnchor, removeAnchor, smooth, stretch, trimRest, minLength, tail, tailMin, setTail, moveClicks, recordedAt, cubicOf, bez, EASES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CursorPath = api;
 })(typeof self !== 'undefined' ? self : this);

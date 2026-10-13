@@ -408,6 +408,9 @@ function setRecordingActive(on) {
   recordingActive = on;
   sendToAnimator('rec:state', on);
   directorRecording(on);
+  // The capture paints the system pointer into its frames, so while recording
+  // the live cursor stands in for it on screen (see liveCursorState).
+  syncLiveCursor();
   // The page streams its scroll velocity to the recorder while capturing.
   page.webContents.send('rec:motion', on);
   // Hand focus back to the page once capture starts, so space and the
@@ -621,12 +624,13 @@ function cursorsChanged() {
 }
 
 // With the live cursor on, the page only ever sees the already-smoothed
-// pointer, so recordings just take the edge off frame timing.
+// pointer, so recordings just take the edge off frame timing (and none at all
+// with smoothing off, when the pointer goes through as it is).
 function recorderCursorPayload() {
   const payload = cursorPayload();
   // A cursor path is already smooth, and its clicks land where it is.
   const smooth = liveCursorState().on || !!pathFor(animationKey());
-  return smooth ? { ...payload, smoothing: LIVE_RECORD_SMOOTHING, damping: 1 } : payload;
+  return smooth ? { ...payload, smoothing: Math.min(payload.smoothing || 0, LIVE_RECORD_SMOOTHING), damping: 1 } : payload;
 }
 
 function syncCursor() {
@@ -646,14 +650,22 @@ function syncCursorSpans() {
 // hides the system pointer and draws a smoothed one. The page is fed the
 // smoothed position instead of the real one (sendInputEvent), so hover effects
 // happen right under the drawn pointer, and clicks wait for it to arrive. Tab
-// capture only sees the page, so it never shows up in recordings, which draw
-// their own pointer.
+// capture only sees the page, so the drawn pointer never shows up in
+// recordings, which draw their own.
+// The system pointer is another matter: Chromium paints it into tab capture
+// frames whenever the mouse has just moved over the page (its
+// MouseCursorOverlayController draws NSCursor.currentCursor). Hidden with
+// `cursor: none`, as the live cursor has the page do, it paints nothing. So a
+// recording always runs with the live cursor, whatever the panel's setting;
+// otherwise the footage would carry the real pointer under the drawn one,
+// two pointers once smoothing pulls them apart.
 const LIVE_RECORD_SMOOTHING = 30; // ms; recordings of an already-smoothed pointer
 const liveCursorOpen = () => !!liveCursor && !liveCursor.webContents.isDestroyed();
 
 function liveCursorState() {
   const keys = !!store.cursor.live;
-  return { keys, on: keys && store.cursor.smoothing > 0 && !overlayMode && !pathMode };
+  const wanted = (keys && store.cursor.smoothing > 0) || recordingActive;
+  return { keys, on: wanted && !overlayMode && !pathMode };
 }
 
 function sendToLiveCursor(channel, data) {

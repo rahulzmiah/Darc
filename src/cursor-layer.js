@@ -1,6 +1,7 @@
 // The pointer Darc draws, shared by recordings and the live cursor.
-// The tab capture has no pointer in it, so the recorder draws one onto each
-// frame from the page's mouse position, after motion blur so it stays sharp.
+// The system pointer is kept out of the tab capture (hidden while recording,
+// see main.js), so the editor draws one onto each frame from the page's logged
+// mouse position, after motion blur so it stays sharp.
 // The live cursor (cursor.html) draws the same one over the page in place of
 // the real one. A damped spring smooths the raw movement, and the page's
 // cursor spans (set in the animation panel) fade it in and out during
